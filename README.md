@@ -40,7 +40,9 @@ ctest --test-dir build -C Release --output-on-failure
 
 サンプルメールはボタンで編集欄に入力するだけです。自動配信せず、管理者が確認して登録します。サンプル文面の障害は現在のサーバーの状態を示すものではありません。
 
-仕様書: [XBAND-COMMAND-SPEC-DRAFT.md](docs/XBAND-COMMAND-SPEC-DRAFT.md)。`components/xband` 内の過去の資料には開発時のパスや実験の説明が残っています。現在のリリースの起動方法はこのREADMEと同梱スクリプトを優先してください。
+仕様書: [サーバーとモデムの仕様書](docs/SERVER-MODEM-SPEC.md)、[閲覧用PDF](docs/SERVER-MODEM-SPEC-v0.1.0-ja.pdf)。コマンド、バイト形式、モデムのレジスター、TCP制御、待機、メール、ポイントと結果DBを説明し、確認根拠と未解明事項を区別しています。PDFはv0.1.0リリースにも追加添付しています。仕様書の対象実装は初回タグv0.1.0で、実行ファイルと既存ZIPの変更はありません。
+
+詳しい解析記録: [XBAND-COMMAND-SPEC-DRAFT.md](docs/XBAND-COMMAND-SPEC-DRAFT.md)。この下書きには過去の実装状態も残ります。`components/xband` 内の過去の資料には開発時のパスや実験の説明が残っています。現在のリリースの起動方法はこのREADMEと同梱スクリプトを優先してください。
 
 ## 権利・依存関係
 
