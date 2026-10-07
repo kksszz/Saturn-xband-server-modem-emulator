@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "port": 58133,
+  "identities": [
+    {
+      "endpoint": "modem1",
+      "auth_key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  ]
+}
