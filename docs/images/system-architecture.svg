@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="960" height="650" viewBox="0 0 960 650" role="img" aria-labelledby="title description">
   <title id="title">Saturn XBAND Server / Modem Emulator 構成図</title>
-  <desc id="description">青緑色のサーバー・モデム・エミュレーター側接続モジュールが本リポジトリの対応範囲。灰色のYMIR等のエミュレーター本体は含まない。接続モジュールはYMIR向け参考ソースであり、本体へ別途組み込む必要がある。</desc>
+  <desc id="description">青緑色のサーバー・モデム・エミュレーター側接続モジュールが本リポジトリの対応範囲。灰色のセガサターンエミュレーター本体は含まない。接続モジュールは接続アダプターの参考ソースであり、本体へ別途組み込む必要がある。</desc>
   <defs>
     <marker id="arrow" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
       <path d="M 0 0 L 10 5 L 0 10 z" fill="#52677f"/>
@@ -30,10 +30,10 @@
     <rect x="558" y="425" width="324" height="70" rx="9" fill="#e0f1f3" stroke="#247984" stroke-width="2"/>
     <text x="240" y="453" fill="#174e57" font-size="19" font-weight="700">エミュレーター側 接続モジュール</text>
     <text x="720" y="453" fill="#174e57" font-size="19" font-weight="700">エミュレーター側 接続モジュール</text>
-    <text x="240" y="479" fill="#174e57" font-size="16">YMIR向けアダプターの参考ソース</text>
-    <text x="720" y="479" fill="#174e57" font-size="16">YMIR向けアダプターの参考ソース</text>
-    <text x="240" y="535" fill="#435b74" font-size="23" font-weight="700">YMIR等のエミュレーター</text>
-    <text x="720" y="535" fill="#435b74" font-size="23" font-weight="700">YMIR等のエミュレーター</text>
+    <text x="240" y="479" fill="#174e57" font-size="16">接続アダプターの参考ソース</text>
+    <text x="720" y="479" fill="#174e57" font-size="16">接続アダプターの参考ソース</text>
+    <text x="240" y="535" fill="#435b74" font-size="23" font-weight="700">セガサターンエミュレーター</text>
+    <text x="720" y="535" fill="#435b74" font-size="23" font-weight="700">セガサターンエミュレーター</text>
     <text x="240" y="567" fill="#52677f" font-size="16">左端末：本体は対象外・別途組み込み</text>
     <text x="720" y="567" fill="#52677f" font-size="16">右端末：本体は対象外・別途組み込み</text>
     <text x="480" y="628" fill="#52677f" font-size="16">接続モジュールは本体へ組み込む一部分です。本体・ゲームDISC(ROM)・BIOSは同梱しません。</text>
