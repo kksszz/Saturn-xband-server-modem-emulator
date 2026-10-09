@@ -1,4 +1,4 @@
-param([string]$Version='v0.2.0')
+param([string]$Version='v0.3.0')
 $ErrorActionPreference='Stop'
 if($Version -notmatch '^v\d+\.\d+\.\d+([.-][a-zA-Z0-9.-]+)?$'){throw 'Invalid release version'}
 $taskStage=Join-Path $PSScriptRoot ('artifacts/'+$Version+'/Saturn-xband-server-modem-emulator-windows-x64')
@@ -10,6 +10,7 @@ $taskMapping=@{
     'README.md'='README.md'
     'RELEASE-NOTES.md'='RELEASE-NOTES.md'
     'THIRD-PARTY-NOTICES.md'='THIRD-PARTY-NOTICES.md'
+    'LICENSE'='LICENSE'
     'config/jp-area-codes.json'='config/jp-area-codes.json'
     'docs/XBAND-COMMAND-SPEC-DRAFT.md'='docs/XBAND-COMMAND-SPEC-DRAFT.md'
     'docs/SERVER-MODEM-SPEC.md'='docs/SERVER-MODEM-SPEC.md'
@@ -36,7 +37,7 @@ foreach($taskInput in $taskMapping.Keys){$taskTarget=Join-Path $taskStage $taskM
 $taskManifest=@(Get-ChildItem -LiteralPath $taskStage -File -Recurse | Sort-Object FullName | ForEach-Object {
     [ordered]@{path=$_.FullName.Substring($taskStage.Length+1).Replace('\','/');sha256=(Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant();bytes=$_.Length}
 })
-[ordered]@{version=$Version;development_snapshot='v55-common-credit';ymir_included=$false;personal_data_included=$false;files=$taskManifest} | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $taskStage 'manifest.json') -Encoding UTF8
+[ordered]@{version=$Version;development_snapshot='source-integration';license='GPL-3.0-only';ymir_included=$false;personal_data_included=$false;files=$taskManifest} | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $taskStage 'manifest.json') -Encoding UTF8
 Compress-Archive -LiteralPath $taskStage -DestinationPath $taskZip
 $taskChecksum=(Get-FileHash -LiteralPath $taskZip -Algorithm SHA256).Hash.ToLowerInvariant()+'  '+(Split-Path $taskZip -Leaf)
 $taskChecksum | Set-Content -LiteralPath (Join-Path (Split-Path $taskStage) 'SHA256SUMS.txt') -Encoding ASCII

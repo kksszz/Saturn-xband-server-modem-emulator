@@ -6,4 +6,4 @@
 - `components/xband/adapters/ymir` contains this project's adapter examples. Ymir itself, its upstream source, executable, BIOS and game media are not included.
 - `integration/ymir/ymir-9a237ea-serial-xband.patch` contains integration changes and limited upstream source context for Ymir commit `9a237ea6642912ae0833f691809aa47dc27f908d`. It is not the complete Ymir source or executable. Upstream GPLv3 license text is preserved in `integration/ymir/LICENSE-GPL-3.0.txt`; upstream and component notices must remain with their respective materials.
 
-This private snapshot does not assign a new license to third-party materials or claim rights to SEGA/Catapult trademarks. A public release would require a separate licensing review of the new code and any derived portions.
+This project is published under GNU GPL version 3 (GPL-3.0-only); see the root LICENSE. Copyright (C) 2026 Saturn XBAND Server / Modem Emulator contributors. Third-party materials retain their respective notices and licenses. This does not claim rights to SEGA/Catapult trademarks or grant permission to distribute game media, BIOS, or other third-party assets.
