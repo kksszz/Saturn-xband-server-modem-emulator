@@ -2,6 +2,8 @@
 
 更新日：2026-10-09。Windows x64で、YMIRに本プロジェクトのモデム部品を取り込み、独立したXBANDサーバーへ接続するための説明です。このマニュアルでは接続先を特定するため、YMIRの名称を明記します。
 
+まずは同一PC上での試験を対象にしています。XBANDは同一PC上のサーバーと左右2つのYMIR、対戦ケーブルは同一PC上の2つのYMIRの直接接続で確認しています。本書の基本セットアップはこの構成です。別PC間のLAN接続やインターネット越しの対戦は、現時点の動作確認範囲に含めていません。
+
 ## 1 最初に確認すること
 
 公開済みv0.2.0のWindows配布ZIPに入っているのはサーバー実行ファイルと設定・文書です。現在のソースでは、次回配布用に`integration/ymir`のソース差分・適用スクリプトと、`components/xband`のモデム部品も同梱する設定にしています。YMIR本体・EXE、ゲームDISC(ROM)、BIOSは含めません。公開済みZIPは変更していません。
@@ -121,7 +123,7 @@ git -C $ymirSource switch -c local-xband-integration
 
 この版のSerial Portには、対戦ケーブル、XBANDモデム、カード設定の欄があります。旧テスト番号を入力済みにせず、電話番号を利用者が入力してから接続します。カードの自動挿入・補充は行いません。
 
-対戦ケーブルのみを使う場合、同じPCでは左右のSerial Portで`Same PC (automatic)`、TCPポート`32458`を合わせて`Enable Battle (Taisen) Cable`を有効にします。双方で同期設定を合わせ、変更時は再起動します。XBANDサーバーは不要です。LANでは一方を`LAN host (listen)`、もう一方を`LAN client (connect)`にし、ホストIPv4とポートを合わせます。XBANDモデムは切断しておきます。詳しくは[対戦ケーブル仕様書](BATTLE-CABLE-SERIAL-SPEC.md)を参照してください。
+対戦ケーブルのみを使う場合、同じPCでは左右のSerial Portで`Same PC (automatic)`、TCPポート`32458`を合わせて`Enable Battle (Taisen) Cable`を有効にします。双方で同期設定を合わせ、変更時は再起動します。XBANDサーバーは不要です。LAN設定も実装されていますが、別PC間の動作は未確認です。設定上は一方を`LAN host (listen)`、もう一方を`LAN client (connect)`にし、ホストIPv4とポートを合わせます。XBANDモデムは切断しておきます。詳しくは[対戦ケーブル仕様書](BATTLE-CABLE-SERIAL-SPEC.md)を参照してください。
 
 XBANDを使う場合は対戦ケーブルを無効にし、4～8章へ進みます。モデムとの同時使用はできません。手動の移植箇所を確認する場合は10章を参照してください。
 
