@@ -107,7 +107,7 @@ class XbandDashboard {
         INITCOMMONCONTROLSEX common{sizeof(common),ICC_LISTVIEW_CLASSES};InitCommonControlsEx(&common);
         mailWindow=CreateWindowW(c.lpszClassName,L"XBAND | \u30e1\u30fc\u30eb\u5c65\u6b74",WS_OVERLAPPEDWINDOW,CW_USEDEFAULT,CW_USEDEFAULT,1240,760,owner,nullptr,c.hInstance,this);
         if(!mailWindow)return;
-        for(unsigned i=0;i<3;++i)CreateWindowW(L"BUTTON",i==0?L"Previous":i==1?L"Next":L"Refresh",WS_CHILD|WS_VISIBLE|WS_TABSTOP,12+i*110,12,100,30,mailWindow,reinterpret_cast<HMENU>(INT_PTR(980+i)),c.hInstance,nullptr);
+        for(unsigned i=0;i<3;++i)CreateWindowW(L"BUTTON",i==0?L"前へ":i==1?L"次へ":L"更新",WS_CHILD|WS_VISIBLE|WS_TABSTOP,12+i*110,12,100,30,mailWindow,reinterpret_cast<HMENU>(INT_PTR(980+i)),c.hInstance,nullptr);
         CreateWindowW(L"BUTTON",L"\u89e3\u6790\u30c7\u30fc\u30bf\u5207\u66ff",WS_CHILD|WS_VISIBLE|WS_TABSTOP,342,12,160,30,mailWindow,reinterpret_cast<HMENU>(INT_PTR(983)),c.hInstance,nullptr);
         CreateWindowW(L"BUTTON",L"センター配信メール...",WS_CHILD|WS_VISIBLE|WS_TABSTOP,520,12,180,30,mailWindow,reinterpret_cast<HMENU>(INT_PTR(984)),c.hInstance,nullptr);
         mailSummary=CreateWindowW(L"STATIC",L"",WS_CHILD|WS_VISIBLE,720,18,450,24,mailWindow,nullptr,c.hInstance,nullptr);
@@ -324,7 +324,7 @@ class XbandDashboard {
         auto row=rankingRows[size_t(index)];
         if(defaults){row.winPoints=diagnostic::newGameDefaultWinPoints;row.losePoints=diagnostic::newGameDefaultLosePoints;for(const auto&r:diagnostic::rankingDefaults())if(r.gameID==row.gameID)row=r;}
         SetWindowTextW(rankingEdits[0],diagnostic::rankingWide(row.fields[0]).c_str());
-        for(unsigned i=1;i<5;++i){SetWindowTextW(rankingEdits[i],i==2?L"Server cumulative total (initial 0)":L"Calculated from rank threshold settings");EnableWindow(rankingEdits[i],FALSE);}
+        for(unsigned i=1;i<5;++i){SetWindowTextW(rankingEdits[i],i==2?L"サーバー累積値（初期値0）":L"昇格条件から自動計算");EnableWindow(rankingEdits[i],FALSE);}
         SendMessageW(rankingAward,CB_SETCURSEL,row.winPoints<0?0:1,0);
         SetWindowTextW(rankingAwardValue,std::to_wstring(row.winPoints<0?1:row.winPoints).c_str());
         EnableWindow(rankingAwardValue,row.winPoints>=0);
@@ -392,14 +392,14 @@ class XbandDashboard {
             HWND h=CreateWindowW(cls,title,WS_CHILD|WS_VISIBLE|style,x,y,width,height,rankingWindow,reinterpret_cast<HMENU>(INT_PTR(id)),c.hInstance,nullptr);
             SendMessageW(h,WM_SETFONT,reinterpret_cast<WPARAM>(GetStockObject(DEFAULT_GUI_FONT)),TRUE);return h;
         };
-        control(L"STATIC",L"Game / fixed ID",0,18,22,142,24,0);
+        control(L"STATIC",L"ゲーム／固定ID",0,18,22,142,24,0);
         rankingSelector=control(L"COMBOBOX",L"",CBS_DROPDOWNLIST|WS_VSCROLL|WS_TABSTOP,170,18,475,220,901);
         for(const auto &r:rankingRows){wchar_t id[24];std::swprintf(id,24,L"0x%08X  ",unsigned(r.gameID));auto name=std::wstring(id)+diagnostic::rankingWide(r.fields[0]);SendMessageW(rankingSelector,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(name.c_str()));}
-        const wchar_t*labels[]={L"Game name",L"Current level",L"Current points",L"Next level",L"Points still required"};
+        const wchar_t*labels[]={L"ゲーム名",L"現在のランク",L"累積ポイント",L"次のランク",L"昇格までの必要ポイント"};
         for(unsigned i=0;i<5;++i){int y=64+int(i)*42;control(L"STATIC",labels[i],0,18,y+4,145,26,0);rankingEdits[i]=control(L"EDIT",L"",WS_BORDER|ES_AUTOHSCROLL|WS_TABSTOP,170,y,475,29,902+i);SendMessageW(rankingEdits[i],EM_SETLIMITTEXT,128,0);}
-        control(L"STATIC",L"Match award",0,18,278,145,26,0);
+        control(L"STATIC",L"ポイント加算方法",0,18,278,145,26,0);
         rankingAward=control(L"COMBOBOX",L"",CBS_DROPDOWNLIST|WS_TABSTOP,170,274,280,150,911);
-        for(const auto* label:{L"No server override",L"Use server-configured award"})
+        for(const auto* label:{L"サーバー加算なし",L"サーバー設定の配点を使用"})
             SendMessageW(rankingAward,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(label));
         control(L"STATIC",L"勝者ポイント",0,18,320,145,26,0);
         rankingAwardValue=control(L"EDIT",L"1",WS_BORDER|ES_NUMBER|WS_TABSTOP,170,316,100,29,912);
@@ -407,10 +407,10 @@ class XbandDashboard {
         control(L"STATIC",L"敗者ポイント",0,330,320,125,26,0);
         rankingLoseValue=control(L"EDIT",L"0",WS_BORDER|ES_NUMBER|WS_TABSTOP,465,316,100,29,914);
         SendMessageW(rankingLoseValue,EM_SETLIMITTEXT,3,0);
-        control(L"BUTTON",L"Save",WS_TABSTOP|BS_DEFPUSHBUTTON,170,376,115,32,907);
+        control(L"BUTTON",L"保存",WS_TABSTOP|BS_DEFPUSHBUTTON,170,376,115,32,907);
         control(L"BUTTON",L"昇格条件...",WS_TABSTOP,18,376,132,32,913);
-        control(L"BUTTON",L"Reset title / award",WS_TABSTOP,300,376,160,32,908);
-        control(L"BUTTON",L"Close",WS_TABSTOP,475,376,115,32,909);
+        control(L"BUTTON",L"名前・配点の初期値",WS_TABSTOP,300,376,160,32,908);
+        control(L"BUTTON",L"閉じる",WS_TABSTOP,475,376,115,32,909);
         rankingMessage=control(L"STATIC",L"",0,18,422,630,98,910);
         control(L"STATIC",L"新規ゲームID (HEX)",0,18,534,145,26,0);
         auto idEdit=control(L"EDIT",L"0x",WS_BORDER|ES_AUTOHSCROLL|WS_TABSTOP,170,530,200,29,915);SendMessageW(idEdit,EM_SETLIMITTEXT,10,0);
@@ -499,7 +499,7 @@ class XbandDashboard {
         if(!s)return DefWindowProcW(w,m,a,b);
         if(m==WM_SIZE){layoutButtons(w);return 0;}
         if(m>=WM_APP+41&&m<=WM_APP+46){
-            const int ids[]={900,950,979,978,975,976};const wchar_t* labels[]={L"Game / point settings...",L"使用状況の表示設定...",L"Mail history...",L"接続・対戦・ポイント履歴...",L"対戦待ち時間設定...",L"消費度数設定..."};
+            const int ids[]={900,950,979,978,975,976};const wchar_t* labels[]={L"ゲーム・ポイント設定...",L"使用状況の表示設定...",L"メール履歴...",L"接続・対戦・ポイント履歴...",L"対戦待ち時間設定...",L"消費度数設定..."};
             const auto i=m-(WM_APP+41);
             if(!GetDlgItem(w,ids[i]))CreateWindowW(L"BUTTON",labels[i],WS_CHILD|WS_VISIBLE|WS_TABSTOP,0,0,0,0,w,reinterpret_cast<HMENU>(INT_PTR(ids[i])),GetModuleHandleW(nullptr),nullptr);
             layoutButtons(w);return 0;
@@ -803,7 +803,7 @@ public:
     }
 #endif
     XbandDashboard(){worker=std::thread([this]{WNDCLASSW c{};c.lpfnWndProc=proc;c.hInstance=GetModuleHandleW(nullptr);c.lpszClassName=L"XbandDashboard";c.hCursor=LoadCursor(nullptr,IDC_ARROW);RegisterClassW(&c);
-        HWND w=CreateWindowW(c.lpszClassName,L"XBAND Server | Communication Monitor",WS_OVERLAPPEDWINDOW|WS_CLIPCHILDREN,CW_USEDEFAULT,CW_USEDEFAULT,1100,850,nullptr,nullptr,c.hInstance,this);hwnd=w;if(w){ShowWindow(w,SW_SHOWNOACTIVATE);SetTimer(w,1,250,nullptr);}ready=true;if(!w)return;MSG msg;while(GetMessage(&msg,nullptr,0,0)>0){TranslateMessage(&msg);DispatchMessage(&msg);}});while(!ready)Sleep(1);if(!hwnd){worker.join();throw std::runtime_error("Dashboard creation failed");}}
+        HWND w=CreateWindowW(c.lpszClassName,L"XBANDサーバー | 通信モニター",WS_OVERLAPPEDWINDOW|WS_CLIPCHILDREN,CW_USEDEFAULT,CW_USEDEFAULT,1100,850,nullptr,nullptr,c.hInstance,this);hwnd=w;if(w){ShowWindow(w,SW_SHOWNOACTIVATE);SetTimer(w,1,250,nullptr);}ready=true;if(!w)return;MSG msg;while(GetMessage(&msg,nullptr,0,0)>0){TranslateMessage(&msg);DispatchMessage(&msg);}});while(!ready)Sleep(1);if(!hwnd){worker.join();throw std::runtime_error("Dashboard creation failed");}}
     ~XbandDashboard(){if(auto w=hwnd.load())PostMessage(w,WM_CLOSE,0,0);if(worker.joinable())worker.join();}
     bool isClosed()const{return closed;}
     void publish(const J&v){std::lock_guard lock(mutex);const auto now=GetTickCount64();const auto&p=v.at("pair_control");
