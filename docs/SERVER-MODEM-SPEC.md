@@ -674,7 +674,7 @@ SNES系を含む公開旧ソースの端末別結果精算・不完全消費・�
 | 個別対戦精算 | outputs/live-capture-tests/live_match_credits.hpp |
 | 消費台帳とメール精算 | outputs/live-capture-tests/deferred_credit_settlement.hpp と service_mail_credit.hpp |
 | カード通信と完全返信 | outputs/live-capture-tests/media_card_debit_wire.hpp と service_card_debit_exchange.hpp |
-| 仮想メディカカードと挿抜 | components/xband/include/xband/virtual_media_card.hpp と adapters/ymir/frontend_modem.hpp |
+| 仮想サターンメディアカードと挿抜 | components/xband/include/xband/virtual_media_card.hpp と adapters/ymir/frontend_modem.hpp |
 | UARTとAT | components/xband/include/xband/modem_register_bank.hpp と at_command.hpp |
 | 外側wire | components/xband/include/xband/frame_codec.hpp と wire_json.hpp |
 | ログイン | components/xband/include/xband/login_handshake.hpp |
