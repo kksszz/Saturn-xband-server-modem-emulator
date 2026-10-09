@@ -76,6 +76,11 @@ ctest --test-dir build -C Release --output-on-failure
 
 詳しい解析記録: [XBAND-COMMAND-SPEC-DRAFT.md](docs/XBAND-COMMAND-SPEC-DRAFT.md)。この下書きには過去の実装状態も残ります。`components/xband` 内の過去の資料には開発時のパスや実験の説明が残っています。現在のリリースの起動方法はこのREADMEと同梱スクリプトを優先してください。
 
+## 今後の開発検討事項
+
+- 実サターンメディアカードの読み書き機能の実装。
+- 別PC間での動作試験。
+
 ## 権利・依存関係
 
 XBAND/SEGA等の商標は各権利者に帰属します。Catapultの旧ソース、ゲームDISC(ROM)由来画像・アイコンは同梱せず、必要なアイコンは利用者のゲームDISC(ROM)内リソースを参照します。nlohmann/jsonはMITライセンスです。本プロジェクトの新規コードへの一般公開ライセンスは未設定であり、第三者への再配布許諾をこのプレリリースが意味するものではありません。
