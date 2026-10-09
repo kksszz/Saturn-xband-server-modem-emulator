@@ -1,8 +1,9 @@
 #pragma once
 #include "game_point_history.hpp"
+#include "deferred_credit_result_observation.hpp"
 namespace diagnostic {
 // Append-only local database of reports, not a claim of historical production rules.
-// Raw command20 is authoritative. Decoding is limited to verified Saturn offsets.
+// Raw result blocks (20 or 23) are authoritative; verified Saturn offsets only.
 class GameResultDatabase {
     using J=nlohmann::json;
     std::shared_ptr<ActivityHistory> reports;
@@ -43,11 +44,16 @@ public:
             if(!connection.is_null()||(page+1)*50>=batch.at("total").get<size_t>())break;
         }
         context["event"]="game_result_report";context["game"]=game;
-        if(const auto registrationGame=receivedGameID(request);registrationGame&&*registrationGame!=game)context["title"]="不明（結果と登録のゲームIDが異なる）";
+        if(const auto registrationGame=receivedGameID(request);registrationGame&&*registrationGame!=game){
+            context["reporting_game"]=*registrationGame;
+            context["title"]=audit.is_null()?J("不明（結果と登録のゲームIDが異なる）"):audit.value("title",J("不明"));
+        }
         context["reporting_profile"]=context.value("profile",-1);context["reporting_name"]=context.value("name",std::string{});
         context["profile"]=nullptr;context["name"]="不明";
-        context["raw_command20"]=raw;context["report_fingerprint"]=fingerprint;
+        // Preserve the legacy key for existing DB/UI readers, including 23.
+        context["raw_command20"]=raw;context["raw_result_block"]=raw;context["report_fingerprint"]=fingerprint;
         context["game_error"]=LocalTCPProbe::longword(raw,8);
+        context["credit_observation"]=deferredCreditResultObservation(request);
         context["local_player1_result"]=LocalTCPProbe::longword(raw,12);context["local_player2_result"]=LocalTCPProbe::longword(raw,16);
         context["remote_player1_result"]=LocalTCPProbe::longword(raw,20);context["remote_player2_result"]=LocalTCPProbe::longword(raw,24);
         const uint64_t local=uint64_t(LocalTCPProbe::longword(raw,12))+LocalTCPProbe::longword(raw,16);

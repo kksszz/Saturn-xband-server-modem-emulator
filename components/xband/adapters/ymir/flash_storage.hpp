@@ -12,10 +12,10 @@
 namespace xband::ymir_adapter {
 // One physical modem image per frontend profile, shared across its games.
 // Exclusive profile lock prevents two clients overwriting the same modem.
-class FlashStorage {
+template<size_t N>class FixedImageStorage {
 public:
-    using Image=std::array<uint8_t,0x20000>;
-    explicit FlashStorage(std::filesystem::path path):path_(std::move(path)) {
+    using Image=std::array<uint8_t,N>;
+    explicit FixedImageStorage(std::filesystem::path path):path_(std::move(path)) {
         std::filesystem::create_directories(path_.parent_path());
         auto lockPath=path_;lockPath+=L".lock";
         lock_=CreateFileW(lockPath.c_str(),GENERIC_READ|GENERIC_WRITE,0,nullptr,OPEN_ALWAYS,FILE_ATTRIBUTE_NORMAL,nullptr);
@@ -30,9 +30,9 @@ public:
             }
         }catch(...){CloseHandle(lock_);lock_=INVALID_HANDLE_VALUE;throw;}
     }
-    ~FlashStorage(){if(lock_!=INVALID_HANDLE_VALUE)CloseHandle(lock_);}
-    FlashStorage(const FlashStorage&)=delete;
-    FlashStorage& operator=(const FlashStorage&)=delete;
+    ~FixedImageStorage(){if(lock_!=INVALID_HANDLE_VALUE)CloseHandle(lock_);}
+    FixedImageStorage(const FixedImageStorage&)=delete;
+    FixedImageStorage& operator=(const FixedImageStorage&)=delete;
     const std::optional<Image>& loaded()const{return saved_;}
     bool save(const Image &image) {
         if(saved_&&*saved_==image)return false;
@@ -57,4 +57,6 @@ private:
     HANDLE lock_=INVALID_HANDLE_VALUE;
     std::optional<Image> saved_;
 };
+using FlashStorage=FixedImageStorage<0x20000>;
+using VirtualCardStorage=FixedImageStorage<13>;
 }

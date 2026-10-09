@@ -38,20 +38,24 @@ public:
         auto pending=path;pending+=L".pending";if(std::filesystem::exists(pending))throw std::runtime_error("Incomplete level settings; preserve and recover");
         if(!std::filesystem::exists(path)){commit(rows,formats);return;}
         if(std::filesystem::file_size(path)>65536)throw std::runtime_error("Oversized level settings");
-        std::ifstream in(path);J j;in>>j;if(j.at("schema")!=1||j.at("games").size()!=rows.size())throw std::runtime_error("Invalid level settings");
+        std::ifstream in(path);J j;in>>j;if(j.at("schema")!=1||!j.at("games").is_array()||j.at("games").size()<8||j.at("games").size()>63)throw std::runtime_error("Invalid level settings");
         std::vector<uint32_t> seen;
-        for(const auto& g:j.at("games")){const auto id=g.at("game_id").get<uint32_t>();
-            if(!rows.contains(id)||std::find(seen.begin(),seen.end(),id)!=seen.end())throw std::runtime_error("Unknown/duplicate level game");
+        for(const auto& g:j.at("games")){const auto& value=g.at("game_id");
+            if(!value.is_number_unsigned()||value.get<uint64_t>()==0||value.get<uint64_t>()>=0xffffffffULL)throw std::runtime_error("Invalid level game ID");
+            const auto id=value.get<uint32_t>();
+            if(std::find(seen.begin(),seen.end(),id)!=seen.end())throw std::runtime_error("Duplicate level game");
+            rows.try_emplace(id,uniform(200));formats.try_emplace(id,Appearance{});
             if(!g.at("thresholds").is_array()||g.at("thresholds").size()!=30)throw std::runtime_error("Exactly30 thresholds required");
             for(const auto& v:g.at("thresholds"))if(!v.is_number_unsigned()||v.get<uint64_t>()>999999999)throw std::runtime_error("Invalid level threshold");
             const auto t=g.at("thresholds").get<Thresholds>();validate(t);rows.at(id)=t;seen.push_back(id);
             if(g.contains("unit")){Appearance a{g.at("unit").get<std::string>(),g.at("descending").get<bool>()};validateAppearance(a);formats.at(id)=a;}
         }
+        for(const auto& r:rankingDefaults())if(r.slot<=8&&std::find(seen.begin(),seen.end(),r.gameID)==seen.end())throw std::runtime_error("Missing original level setting");
     }
-    Thresholds thresholds(uint32_t game)const{std::lock_guard lock(mutex);return rows.at(game);}
-    void save(uint32_t game,const Thresholds& values){validate(values);std::lock_guard lock(mutex);auto staged=rows;staged.at(game)=values;commit(staged,formats);}
-    Appearance appearance(uint32_t game)const{std::lock_guard lock(mutex);return formats.at(game);}
-    void saveAppearance(uint32_t game,Appearance a){validateAppearance(a);std::lock_guard lock(mutex);auto staged=formats;staged.at(game)=a;commit(rows,staged);}
+    Thresholds thresholds(uint32_t game)const{std::lock_guard lock(mutex);auto it=rows.find(game);return it==rows.end()?uniform(200):it->second;}
+    void save(uint32_t game,const Thresholds& values){if(!game||game==0xffffffffu)throw std::runtime_error("Invalid level game ID");validate(values);std::lock_guard lock(mutex);auto staged=rows;auto appearance=formats;staged[game]=values;appearance.try_emplace(game,Appearance{});if(staged.size()>63)throw std::runtime_error("Maximum63 level games");commit(staged,appearance);}
+    Appearance appearance(uint32_t game)const{std::lock_guard lock(mutex);auto it=formats.find(game);return it==formats.end()?Appearance{}:it->second;}
+    void saveAppearance(uint32_t game,Appearance a){if(!game||game==0xffffffffu)throw std::runtime_error("Invalid level game ID");validateAppearance(a);std::lock_guard lock(mutex);auto staged=formats;auto thresholds=rows;staged[game]=a;thresholds.try_emplace(game,uniform(200));if(staged.size()>63)throw std::runtime_error("Maximum63 level games");commit(thresholds,staged);}
     std::string label(uint32_t game,unsigned rank)const{
         if(rank<1||rank>30)throw std::runtime_error("Rank outside1..30");const auto a=appearance(game);const auto n=a.descending?31-rank:rank;
         if(a.unit=="LEVEL")return "LEVEL "+std::to_string(n);

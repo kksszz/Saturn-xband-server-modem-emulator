@@ -9,10 +9,10 @@ inline uint32_t vfStandbyWaitTicks(uint8_t preference){
     return activeStandbyWait?activeStandbyWait->ticks(preference):standbyWaitTicks(preference);
 }
 inline std::vector<uint8_t> standbyDialogWire(const std::string& title,uint32_t ticks){
-    if(title.empty()||title.size()>64||ticks==0||ticks>standbyWaitMaxMinutes*standbyWaitTicksPerMinute)
+    if(title.size()>64||ticks==0||ticks>standbyWaitMaxMinutes*standbyWaitTicksPerMinute)
         throw std::runtime_error("Invalid bounded standby dialog");
     const auto minutes=(ticks+3599)/3600;
-    const auto text=rankingStandardEUC(rankingUTF8(L"\u3042\u306a\u305f\u306b\u3075\u3055\u308f\u3057\u3044"))+rankingEUC(title)+
+    const auto text=rankingStandardEUC(rankingUTF8(L"\u3042\u306a\u305f\u306b\u3075\u3055\u308f\u3057\u3044"))+(title.empty()?std::string{}:rankingEUC(title))+
         rankingStandardEUC(rankingUTF8(L"\u306e\u5bfe\u6226\u76f8\u624b\u3092\u7d04"))+std::to_string(minutes)+
         rankingStandardEUC(rankingUTF8(L"\u5206\u9593\u63a2\u3057\u307e\u3059\u3002\u3057\u3070\u3089\u304f\u304a\u5f85\u3061\u304f\u3060\u3055\u3044\u3002"));
     if(text.size()+1>256)throw std::runtime_error("Standby dialog too long");

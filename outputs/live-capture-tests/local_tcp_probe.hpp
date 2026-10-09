@@ -6,10 +6,12 @@
 #include "diagnostic_postmatch_request.hpp"
 #include "diagnostic_date_fixture.hpp"
 #include "diagnostic_level_fixture.hpp"
+#include "service_card_debit_exchange.hpp"
 #include "../../components/xband/include/xband/local_phone_policy.hpp"
 #include <iostream>
 #include <stdexcept>
 #include <functional>
+#include <chrono>
 // One fixed virtual connection; optional fixed diagnostic reply. Not a general TCP stack.
 struct LocalTCPProbe {
     using Bytes=LocalDiscoveryProbe::Bytes;
@@ -56,11 +58,80 @@ struct LocalTCPProbe {
     std::string diagnosticPeerNumber="5550100";
     std::function<bool()> prepareServiceReply;
     std::function<void()> onServiceReplySent;
+    // Complete validated registration only. May arm one automatic debit before
+    // any ordinary reply/clear is prepared; false blocks this service call.
+    std::function<bool()> prepareCardDebit;
     unsigned serviceWindow=0;
+    media_card::ServiceDebitExchange cardDebit;
+    bool cardDebitReleased=false;
+    bool creditDenialSent=false;
+    Bytes creditDenialReply; // Bounded22/02 rejection, never an ordinary service reply.
+    std::function<Bytes(const media_card::ServiceDebitExchange&)> prepareCardDebitFailureReply;
+    std::function<void()> onCreditDenialReplySent;
+    Bytes pollCreditDenial(){
+        if(creditDenialReply.empty()||end02Sent||serviceWindow<creditDenialReply.size())return {};
+        const auto seqOut=localNext;
+        const auto packet=reply(seqOut,nextGuest,0x18,creditDenialReply);
+        localNext+=uint32_t(creditDenialReply.size());end02Sent=creditDenialSent=true;
+        if(onCreditDenialReplySent)onCreditDenialReplySent();
+        return packet; // No mail preparation/clear, matching or successful-debit release.
+    }
+    // Optional settlement hooks. Empty in normal/manual-trial sessions.
+    std::function<void(const media_card::CardReport&,const Bytes&)> beforeCardDebitSend;
+    std::function<void(const media_card::ServiceDebitExchange&)> observeCardDebitSettlement;
+    std::function<bool()> cardDebitSettlementVerified;
+    std::function<uint64_t()> cardDebitClock=[](){return uint64_t(std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count());};
+    void armCardDebitTrial(uint32_t amount,uint64_t timeoutMs){
+        if(directPeer||!captured.empty()||end02Sent||
+           (state!=State::Listen&&state!=State::SynReceived&&state!=State::Established)||diagnosticZeroDebit)
+            throw std::runtime_error("Card debit trial requires a fresh service session");
+        cardDebit.arm(amount,timeoutMs,true); // Full Saturn1E card report followed by signed result.
+    }
+    void releaseAfterCardDebitTrial(){
+        if(cardDebitSettlementVerified&&!cardDebitSettlementVerified())
+            throw std::runtime_error("Settlement acknowledgement not durably confirmed");
+        if(const auto problem=cardDebit.continuationProblem())
+            throw std::runtime_error(problem);
+        cardDebitReleased=true;
+    }
     Bytes pollServiceReply(){
+        // Persist timeout as uncertain in this poll, before considering continuation.
+        cardDebit.expire(cardDebitClock());
+        if(observeCardDebitSettlement)try{observeCardDebitSettlement(cardDebit);}
+        catch(const std::exception& e){
+            cardDebit.state=media_card::ServiceDebitExchange::State::Uncertain;cardDebitReleased=false;
+            std::cerr<<"CARD_SETTLEMENT_ERROR "<<e.what()<<'\n';return {};
+        }
         if(directPeer||!replyEnd02||end02Sent||state!=State::Established||
            !(completeMailProbeRequest(captured,profileMailExperiment) ||
              (replyPostMatchEnd02 && diagnostic::observedPostMatchRequest(captured))))return {};
+        if(prepareCardDebit&&!prepareCardDebit())return {};
+        if(!creditDenialReply.empty())return pollCreditDenial();
+        if(cardDebit.state!=media_card::ServiceDebitExchange::State::Disabled){
+            if(cardDebit.state==media_card::ServiceDebitExchange::State::Armed){
+                const auto at=xband::registrationOffset(captured,135);
+                const auto length=xband::registrationCardLength(captured);
+                if(!length){cardDebit.abandon();return {};}
+                const auto report=media_card::registrationCardReport(std::span<const uint8_t>(captured).subspan(at,8+length));
+                if(serviceWindow<22)return {}; // Full49 request, no partial emission.
+                const auto payload=cardDebit.request(report,cardDebitClock());
+                if(beforeCardDebitSend)try{beforeCardDebitSend(report,payload);}
+                catch(const std::exception& e){
+                    cardDebit.state=media_card::ServiceDebitExchange::State::Uncertain;cardDebitReleased=false;
+                    std::cerr<<"CARD_SETTLEMENT_SEND_BLOCKED "<<e.what()<<'\n';return {};
+                }
+                const auto seqOut=localNext;localNext+=uint32_t(payload.size());
+                return reply(seqOut,nextGuest,0x18,payload); // No02 before native1E result.
+            }
+            if(!cardDebitReleased){
+                if(cardDebit.exhaustedShortfall()&&prepareCardDebitFailureReply){
+                    creditDenialReply=prepareCardDebitFailureReply(cardDebit);
+                    return pollCreditDenial();
+                }
+                return {}; // Unknown/mismatched replies stay blocked; exact trials remain manual.
+            }
+        }
         if(prepareServiceReply&&!prepareServiceReply())return {};
         const Bytes response=applicationReply();
         if(serviceWindow<response.size())return {};
@@ -111,7 +182,11 @@ struct LocalTCPProbe {
             if(!available(length))return false;pos+=length;
             if(!available(4))return false;pos+=4; // opaque trailing scalar, not interpreted as a result
         }else return false;
-        const Bytes tail{0x24,0x26,0x26,0x1b,0,0,0,1,0x29,0,0,0,0};
+        // Original error sender replaces 24 with 23 + an 84-byte block.
+        if(available(85)&&b[pos]==0x23&&longword(b,pos+1)==84&&longword(b,pos+9)!=0){pos+=85;}
+        else if(available(1)&&b[pos]==0x24){++pos;}
+        else return false;
+        const Bytes tail{0x26,0x26,0x1b,0,0,0,1,0x29,0,0,0,0};
         return available(tail.size())&&pos+tail.size()==b.size()&&std::equal(tail.begin(),tail.end(),b.begin()+pos);
     }
     // VF REMIX mail request observed after a match (2026-10-04): one rival
@@ -127,8 +202,8 @@ struct LocalTCPProbe {
                b.size()<6||Bytes(b.begin(),b.begin()+6)!=Bytes{0x1f,0x74,0x6a,0x30,0x34,0x0b})return false;
             xband::registrationPhone(b);
             const size_t card=xband::registrationOffset(b,135);
-            if(card+8>b.size()||b[card]!=0x1e||b[card+1]!=0||longword(b,card+4)!=0)return false;
-            size_t pos=xband::registrationOffset(b,184);
+            if(card+8>b.size()||b[card]!=0x1e||b[card+1]!=0)return false;
+            size_t pos=xband::registrationAfterCardOffset(b,184);
             auto available=[&](size_t n){return pos<=b.size()&&n<=b.size()-pos;};
             if(!available(3)||b[pos]!=0x15)return false;
             const auto resources=D::word(b,pos+1);pos+=3;
@@ -201,21 +276,23 @@ struct LocalTCPProbe {
             // Observed after the paused/ended VF call: 21 then 23 with
             // scalar 84 and exactly 80 opaque bytes, followed by 26/26/1B/29.
             // Do not interpret the scalar or opaque bytes as a result/receipt.
-            if(available(6)&&b[pos]==0x21&&b[pos+1]==0x23&&longword(b,pos+2)==84){
+            if(available(86)&&b[pos]==0x21&&b[pos+1]==0x23&&longword(b,pos+2)==84&&longword(b,pos+10)!=0){
                 pos+=6;
                 if(!available(80))return false;
                 pos+=80;
-                constexpr std::array<uint8_t,12> alternateTail{0x26,0x26,0x1b,0,0,0,1,0x29,0,0,0,0};
-                return pos+alternateTail.size()==b.size()&&
-                    std::equal(alternateTail.begin(),alternateTail.end(),b.begin()+pos);
-            }
+            }else{
             if(!available(5)||b[pos]!=0x20||longword(b,pos+1)!=84)return false;
             pos+=5;
             if(!available(84+4+13))return false;
             pos+=84+4; // Opaque result block and scalar: not a mail acknowledgement.
-            constexpr std::array<uint8_t,4> tailStart{0x24,0x26,0x26,0x1b};
-            if(!available(8)||!std::equal(tailStart.begin(),tailStart.end(),b.begin()+pos))return false;
-            pos+=4;
+            if(!available(1)||b[pos]!=0x24)return false;
+            ++pos;
+            }
+            // Captured local reset23 carries the SAME bounded1B text suffix
+            // as normal20. Validate it structurally; do not require the empty1 form.
+            constexpr std::array<uint8_t,3> tailStart{0x26,0x26,0x1b};
+            if(!available(7)||!std::equal(tailStart.begin(),tailStart.end(),b.begin()+pos))return false;
+            pos+=3;
             if(longword(b,pos)==1){pos+=4;}
             else if(longword(b,pos)==0x11||longword(b,pos)==0x19){
                 // Observed 0x19 suffix carries two bounded NUL-terminated
@@ -242,7 +319,7 @@ struct LocalTCPProbe {
     // The actual selector/target are retained for routing; never authentication.
     static std::optional<std::pair<Bytes,std::string>> namedRequestBody(const Bytes &b) {
         try {
-            const auto code=xband::registrationOffset(b,160);
+            const auto code=xband::registrationAfterCardOffset(b,160);
             if(code<1||code+2>b.size()||b[code-1]!=0x0e||b[code]!=2)return {};
             const auto n=b[code+1];
             if(n<2||n>32||code+2+n>b.size()||b[code+1+n]!=0||
@@ -308,8 +385,9 @@ struct LocalTCPProbe {
         normalized.erase(normalized.begin()+tag+3,normalized.begin()+marker);
         return completeDiagnosticRequest(normalized);
     }
-    static Bytes observedGameResult(const Bytes &b,bool includeErrors=false) {
-        if(const auto named=namedRequestBody(b))return observedGameResult(named->first,includeErrors);
+    static Bytes observedGameResult(const Bytes &b,bool includeErrors=false,uint8_t* observedOpcode=nullptr) {
+        if(observedOpcode)*observedOpcode=0;
+        if(const auto named=namedRequestBody(b))return observedGameResult(named->first,includeErrors,observedOpcode);
         // Only structurally validated complete requests. Never search profile
         // or mail bodies for a result-looking byte pattern.
         size_t listStart=0,pos=0;
@@ -321,9 +399,16 @@ struct LocalTCPProbe {
             for(unsigned i=0;i<count;++i){const auto n=longword(b,pos+2);pos+=6+n;}
             pos+=6; // validated empty 16/1D lists
         }
-        if(pos+85>b.size()||b[pos]!=0x20||longword(b,pos+1)!=84)return {};
+        const bool errorReport=pos+2<=b.size()&&b[pos]==0x21&&b[pos+1]==0x23;
+        if(errorReport){
+            if(!includeErrors)return {};
+            ++pos;
+        }
+        if(pos+85>b.size()||b[pos]!=(errorReport?0x23:0x20)||longword(b,pos+1)!=84)return {};
         Bytes result(b.begin()+pos+1,b.begin()+pos+85);
+        if(errorReport&&longword(result,8)==0)return {};
         if(!includeErrors&&longword(result,8)!=0)return {};
+        if(observedOpcode)*observedOpcode=b[pos];
         return result;
     }
     static Bytes observedVFResult(const Bytes &b) {
@@ -336,7 +421,7 @@ struct LocalTCPProbe {
     // The registration phone field shifts this offset; no fixed absolute byte.
     static uint8_t serviceRequestCode(const Bytes &b,bool allowObservedPlayer3=false) {
         if(!completeMailProbeRequest(b,allowObservedPlayer3))return 0;
-        const size_t code=xband::registrationOffset(b,160);
+        const size_t code=xband::registrationAfterCardOffset(b,160);
         if(code==0||code>=b.size()||b[code-1]!=0x0e)return 0;
         if(b[code]==2)return namedRequestBody(b)?2:0;
         return b[code]==3||b[code]==4?b[code]:0;
@@ -557,9 +642,9 @@ struct LocalTCPProbe {
             return {};
         }
         if(state==State::Listen)return {};
-        if((flags&4)!=0){if(seq==nextGuest)state=State::Stopped;return {};}
+        if((flags&4)!=0){if(seq==nextGuest){cardDebit.abandon();state=State::Stopped;}return {};}
         if((flags&~0x19)!=0||(flags&0x10)==0||
-           (ack!=localNext && !(replyIdleStatus&&statusReplies&&ack==localNext-1) && !(replyPeerProfile&&ack>=localInitial+5&&ack<localNext) && !(((end02Sent && !end02Acknowledged)||(peerLengthSent && !peerLengthAcknowledged)) && ack==localInitial+1)))return {};
+           (ack!=localNext && !(cardDebit.state==media_card::ServiceDebitExchange::State::Waiting&&ack==localInitial+1) && !(replyIdleStatus&&statusReplies&&ack==localNext-1) && !(replyPeerProfile&&ack>=localInitial+5&&ack<localNext) && !(((end02Sent && !end02Acknowledged)||(peerLengthSent && !peerLengthAcknowledged)) && ack==localInitial+1)))return {};
         if(end02Sent && ack==localNext)end02Acknowledged=true;
         if(peerLengthSent && ack==localNext)peerLengthAcknowledged=true;
         if(state==State::SynReceived){
@@ -567,6 +652,19 @@ struct LocalTCPProbe {
             state=State::Established;std::cout<<"TCP_OPEN virtual "<<(directPeer?"10.0.0.2:3000; capture-only": "10.0.0.1:2005; service fixture")<<" guest_port="<<(directPeer?directGuestPort:serviceGuestPort)<<'\n';
         }
         if(seq!=nextGuest)return reply(localNext,nextGuest,0x10,{},unsigned(8192-captured.size()));
+        if(cardDebit.state!=media_card::ServiceDebitExchange::State::Disabled&&
+           cardDebit.state!=media_card::ServiceDebitExchange::State::Armed){
+            serviceWindow=D::word(ip,34);nextGuest+=uint32_t(data.size());
+            if(!data.empty()){
+                if(cardDebit.state==media_card::ServiceDebitExchange::State::Waiting)
+                    cardDebit.receive(data,cardDebitClock());
+                else if(!end02Sent){cardDebit.state=media_card::ServiceDebitExchange::State::Uncertain;cardDebitReleased=false;}
+            }
+            if(flags&1){++nextGuest;cardDebit.abandon();cardDebitReleased=false;state=State::Stopped;}
+            const auto outgoing=pollServiceReply();
+            if(!outgoing.empty())return outgoing;
+            return reply(localNext,nextGuest,0x10); // Response bytes never enter registration capture.
+        }
         if(captured.size()+data.size()>8192){state=State::Stopped;std::cout<<"TCP_STOP capture limit\n";return {};}
         captured.insert(captured.end(),data.begin(),data.end());nextGuest+=uint32_t(data.size());
         if(!data.empty()){
@@ -575,6 +673,7 @@ struct LocalTCPProbe {
             std::cout<<std::dec<<" total="<<captured.size()<<'\n';
         }
         if(flags&1){
+            cardDebit.abandon();
             ++nextGuest;
             if(orderlyClose&&directPeer&&ack==localNext) {
                 finSequence=localNext++;state=State::LastAck;

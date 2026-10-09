@@ -36,6 +36,8 @@ struct PB3PairControl {
     std::function<bool(const std::string&)> matchAdmission; // Server wall-clock policy, independent of guest clocks.
     std::shared_ptr<diagnostic::ActivityHistory> activity;
     std::array<nlohmann::json,2> activityContext{nlohmann::json::object(),nlohmann::json::object()};
+    std::function<void(uint64_t,const std::array<nlohmann::json,2>&)> creditCarrierStarted;
+    std::function<void()> creditCarrierEnded;
     void record(unsigned side,const char* event,const std::string& detail={}){
         if(!activity)return;auto row=activityContext[side];row["side"]=side;row["event"]=event;
         row["generation"]=generation;row["detail"]=detail;
@@ -235,11 +237,13 @@ public:
         }else if(op=="answer"){
             if(side!=pair->roles->callee()||pair->state!=1||request.at("generation")!=pair->generation)
                 throw std::runtime_error("stale or unsolicited original answer");
+            if(pair->creditCarrierStarted)pair->creditCarrierStarted(pair->generation,pair->activityContext);
             pair->state=2;
             pair->record(side,"connected","Peer carrier established; no gameplay completion or winner inference");
             std::cout<<"PAIR_ORIGINAL_ANSWER side="<<side<<" generation="<<pair->generation<<'\n'<<std::flush;
         }else if(op=="hangup"){
             if(request.at("generation")!=pair->generation)throw std::runtime_error("stale hangup");
+            if(pair->creditCarrierEnded)pair->creditCarrierEnded();
             pair->state=0;pair->closing=true;pair->roles->blocked=true;pair->closedAck={};
             pair->record(side,"hangup","Guest modem hangup; not a game result verdict");
             std::cout<<"PAIR_HANGUP side="<<side<<" generation="<<pair->generation<<'\n'<<std::flush;
@@ -264,6 +268,7 @@ public:
     void reset()override{
         input.clear();output.clear();
         if(!used)return;
+        if(pair->state==2&&pair->creditCarrierEnded)pair->creditCarrierEnded();
         pair->record(side,"terminal_leave",pair->state==2?"Transport left during peer connection":"Control transport disconnected");
         if(pair->standbyEnabled){
             const auto& e=pair->standby.entry(side);

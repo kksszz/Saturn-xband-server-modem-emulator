@@ -68,15 +68,21 @@ inline std::string rankingEUC(const std::string &utf8){
 }
 struct GameRankingRow {uint32_t gameID;uint8_t slot;std::array<std::string,5> fields;int winPoints=-1;int losePoints=0;};
 struct GameMatchAward {std::vector<uint8_t> wire;int winPoints=-1;int losePoints=0;bool known=false;};
+// Server policy for newly registered games; not historical award values.
+inline constexpr int newGameDefaultWinPoints=1,newGameDefaultLosePoints=0;
+// Verified game IDs are application defaults, not private runtime data.
+// Keep this catalog in source control and releases; saved settings override it.
 inline std::vector<GameRankingRow> rankingDefaults(){return {
     {0x00010003,1,{rankingUTF8(L"Virtua Fighter\u2122 Remix"),rankingUTF8(L"\u4e94\u6bb5"),"2156",rankingUTF8(L"\u516d\u6bb5"),"2844"}},
     {0x00018003,2,{"PUYO PUYO SUN",rankingUTF8(L"17\u7d1a"),"13",rankingUTF8(L"16\u7d1a"),"7"}},
     {0x00018002,3,{"ID 0x00018002","LEVEL 1","100","LEVEL 2","50"}},
-    {0x00010007,4,{"ID 0x00010007","LEVEL 1","100","LEVEL 2","50"}},
-    {0x00010006,5,{"ID 0x00010006","LEVEL 1","100","LEVEL 2","50"}},
+    {0x00010007,4,{"DECATHLETE XBAND","LEVEL 1","0","LEVEL 2","200"},newGameDefaultWinPoints,newGameDefaultLosePoints},
+    {0x00010006,5,{"DAYTONA USA CIRCUIT EDITION","LEVEL 1","0","LEVEL 2","200"},newGameDefaultWinPoints,newGameDefaultLosePoints},
     {0x00010004,6,{"ID 0x00010004","LEVEL 1","100","LEVEL 2","50"}},
-    {0x00018001,7,{"ID 0x00018001","LEVEL 1","100","LEVEL 2","50"}},
-    {0x00010005,8,{"VIRTUAL-ON","LEVEL 1","100","LEVEL 2","50"}}
+    {0x00018001,7,{"SATURN BOMBERMAN","LEVEL 1","0","LEVEL 2","200"},newGameDefaultWinPoints,newGameDefaultLosePoints},
+    {0x00010005,8,{"VIRTUAL-ON","LEVEL 1","100","LEVEL 2","50"}},
+    {0x00010008,9,{"SEGA WORLD WIDE SOCCER 98","LEVEL 1","0","LEVEL 2","200"},newGameDefaultWinPoints,newGameDefaultLosePoints},
+    {0x00018004,10,{"SHADOWS OF THE TUSK","LEVEL 1","0","LEVEL 2","200"},newGameDefaultWinPoints,newGameDefaultLosePoints}
 };}
 inline void validateRanking(const GameRankingRow &row){
     if(row.winPoints < -1 || row.winPoints > 999)throw std::runtime_error("Match award must be unset (-1) or 0..999");
@@ -102,32 +108,55 @@ public:
         if(std::filesystem::exists(path)){
             std::ifstream in(path,std::ios::binary);if(!in)throw std::runtime_error("Cannot read ranking settings");
             auto j=nlohmann::json::parse(in);
-            if(j.at("schema")!=1||j.at("games").size()!=rows.size())throw std::runtime_error("Invalid ranking settings schema");
+            if(j.at("schema")!=1||!j.at("games").is_array()||j.at("games").size()<8||j.at("games").size()>63)throw std::runtime_error("Invalid ranking settings schema");
             std::vector<uint32_t> seen;
             for(const auto &item:j.at("games")){
-                uint32_t id=item.at("game_id");auto it=std::find_if(rows.begin(),rows.end(),[&](const auto&r){return r.gameID==id;});
-                if(it==rows.end()||std::find(seen.begin(),seen.end(),id)!=seen.end())throw std::runtime_error("Unknown/duplicate game ID in ranking settings");
+                const auto& value=item.at("game_id");
+                if(!value.is_number_unsigned()||value.get<uint64_t>()==0||value.get<uint64_t>()>=0xffffffffULL)throw std::runtime_error("Invalid game ID");
+                uint32_t id=value.get<uint32_t>();auto it=std::find_if(rows.begin(),rows.end(),[&](const auto&r){return r.gameID==id;});
+                if(std::find(seen.begin(),seen.end(),id)!=seen.end())throw std::runtime_error("Duplicate game ID in ranking settings");
+                if(it==rows.end()){if(rows.size()>=63)throw std::runtime_error("Maximum63 games");rows.push_back({id,uint8_t(rows.size()+1),{"","LEVEL 1","0","LEVEL 2","200"},newGameDefaultWinPoints,newGameDefaultLosePoints});it=rows.end()-1;}
                 it->fields=item.at("fields").get<std::array<std::string,5>>();
                 auto award=[&](const char* key,int fallback,int minimum){
                     if(!item.contains(key))return fallback;const auto& v=item.at(key);
                     if(!v.is_number_integer()||v<minimum||v>999)throw std::runtime_error("Invalid saved award range/type");
                     return v.get<int>();
                 };
-                it->winPoints=award("win_points",-1,-1);it->losePoints=award("lose_points",0,0);validateRanking(*it);seen.push_back(id);
+                it->winPoints=award("win_points",it->winPoints,-1);it->losePoints=award("lose_points",0,0);validateRanking(*it);seen.push_back(id);
+                // Promote only the legacy unverified DecAthlete placeholder.
+                // Keep its slot/ID, user totals and explicitly enabled awards.
+                if(id==0x00010007&&it->fields[0]=="ID 0x00010007"){
+                    it->fields[0]="DECATHLETE XBAND";
+                    if(it->winPoints==-1)it->winPoints=newGameDefaultWinPoints;
+                }
             }
+            for(const auto& r:rankingDefaults())if(r.slot<=8&&std::find(seen.begin(),seen.end(),r.gameID)==seen.end())throw std::runtime_error("Missing original game setting");
         }
     }
     std::vector<GameRankingRow> snapshot()const{std::lock_guard lock(mutex);return rows;}
+private:
+    void commit(const std::vector<GameRankingRow>& staged){
+        if(!path.parent_path().empty())std::filesystem::create_directories(path.parent_path());auto tmp=path;tmp+=L".tmp";
+        {std::ofstream out(tmp,std::ios::binary|std::ios::trunc);out<<encode(staged).dump(2);out.flush();if(!out)throw std::runtime_error("Cannot write ranking settings; previous values preserved");}
+        if(std::filesystem::exists(path)){auto backup=path;backup+=L".bak";if(!CopyFileW(path.c_str(),backup.c_str(),FALSE))throw std::runtime_error("Cannot back up ranking settings");}
+        if(!MoveFileExW(tmp.c_str(),path.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH))throw std::runtime_error("Cannot commit ranking settings");
+        rows=staged;
+    }
+public:
+    void add(uint32_t id,const std::string& title){
+        std::lock_guard lock(mutex);
+        if(id==0||id==0xffffffffu)throw std::runtime_error("Game ID must be 1..FFFFFFFE");
+        if(std::any_of(rows.begin(),rows.end(),[&](const auto& r){return r.gameID==id;}))throw std::runtime_error("Game ID already registered");
+        if(rows.size()>=63)throw std::runtime_error("Maximum63 games (ROM resource slots)");
+        auto staged=rows;GameRankingRow row{id,uint8_t(rows.size()+1),{title,"LEVEL 1","0","LEVEL 2","200"},newGameDefaultWinPoints,newGameDefaultLosePoints};
+        validateRanking(row);staged.push_back(row);commit(staged);
+    }
     void update(uint32_t id,const std::array<std::string,5>&fields,std::optional<int> winPoints={},std::optional<int> losePoints={}){
         std::lock_guard lock(mutex);auto staged=rows;
         auto it=std::find_if(staged.begin(),staged.end(),[&](const auto&r){return r.gameID==id;});
         if(it==staged.end())throw std::runtime_error("Unknown game ID");
         it->fields=fields;if(winPoints)it->winPoints=*winPoints;if(losePoints)it->losePoints=*losePoints;validateRanking(*it);
-        if(!path.parent_path().empty())std::filesystem::create_directories(path.parent_path());auto tmp=path;tmp+=L".tmp";
-        {std::ofstream out(tmp,std::ios::binary|std::ios::trunc);out<<encode(staged).dump(2);out.flush();if(!out)throw std::runtime_error("Cannot write ranking settings; previous values preserved");}
-        if(std::filesystem::exists(path)){auto backup=path;backup+=L".bak";if(!CopyFileW(path.c_str(),backup.c_str(),FALSE))throw std::runtime_error("Cannot back up ranking settings");}
-        if(!MoveFileExW(tmp.c_str(),path.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH))throw std::runtime_error("Cannot commit ranking settings");
-        rows=std::move(staged);
+        commit(staged);
     }
     std::vector<uint8_t> introTitleWire(std::optional<uint32_t> id)const{
         // Shared XOS callback 0605CEDE reads writable string008B,

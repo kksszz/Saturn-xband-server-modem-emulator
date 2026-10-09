@@ -6,6 +6,18 @@
 namespace diagnostic {
 inline std::wstring activityLabel(const std::string& event){
     const std::pair<const char*,const wchar_t*> labels[]={
+        {"credit_binding_review",L"度数精算・対戦照合候補"},
+        {"credit_service_pending",L"度数精算・準備"},{"credit_service_sent",L"度数精算・消費要求送信"},
+        {"credit_service_confirmed",L"度数精算・確定"},{"credit_service_uncertain",L"度数精算・結果不明"},
+        {"credit_service_exhausted",L"度数精算・残高不足の部分消費"},
+        {"credit_service_blocked",L"度数精算・処理停止"},
+        {"credit_match_waiting",L"対戦精算・端末結果の未確認"},{"credit_mail_denied",L"対戦精算後・メール残度数不足"},
+        {"credit_notice_sent",L"度数案内・接続終了"},
+        {"credit_insufficient",L"残度数不足・案内終了"},
+        {"credit_trial_armed",L"度数試験・要求受付"},{"credit_trial_sent",L"度数試験・49送信"},
+        {"credit_trial_result",L"度数試験・ROM実績受信"},{"credit_trial_continued",L"度数試験・手動継続"},
+        {"credit_trial_insufficient",L"度数試験・不足案内終了"},
+        {"credit_trial_uncertain",L"度数試験・結果未確認"},{"credit_trial_interrupted",L"度数試験・接続中断"},
         {"access",L"アクセス受付"},{"standby",L"待機登録"},{"ready",L"着信待機開始"},
         {"matched",L"マッチング成立"},{"dial",L"相手へ発信"},{"connected",L"対戦回線接続"},
         {"hangup",L"対戦回線切断"},{"cancel",L"待機終了・取消"},{"service_end",L"サービス応答終了"},
@@ -18,9 +30,20 @@ inline std::wstring activityLabel(const std::string& event){
 inline std::array<std::wstring,14> activityCells(const nlohmann::json& row){
     const auto slot=row.value("profile",-1);
     auto event=activityLabel(row.at("event").get<std::string>());
+    if(row.value("credit_trial_scope",std::string{})=="reviewed-reset-one-shot")event=L"リセット精算・"+event;
+    if(row.value("credit_trial_scope",std::string{})=="automatic-match-settlement")event=L"自動対戦・"+event;
     if(row.contains("result_outcome"))event+=L"（"+rankingWide(row.at("result_outcome").get<std::string>())+L"）";
     auto game=rankingWide(row.value("title",std::string{}));
     if(game.empty()&&row.contains("game")){std::wostringstream s;s<<L"0x"<<std::hex<<row.at("game").get<uint32_t>();game=s.str();}
+    auto status=rankingWide(row.value("point_status",std::string{}));
+    if(row.contains("credit_trial_session")||row.contains("credit_settlement_state")){
+        const auto ledger=row.value("credit_settlement_state",std::string{});
+        status=ledger=="confirmed"?L"精算確定・再送対象外":ledger=="exhausted"?L"部分消費確認・不足終了・再送禁止":ledger=="uncertain"?L"結果不明・再送禁止":
+            ledger=="issued"?L"送信済み・結果待ち":ledger=="pending"?L"未精算":
+            row.value("credit_trial_continuation_verified",false)?L"ROM実績一致・台帳状態未記録":L"消費未確認";
+    }
+    if(row.contains("credit_binding_candidates"))status=L"未検証・自動消費なし";
+    if(row.value("credit_trial_shortfall",false))status=L"部分消費確認・要求量は未精算・再送禁止";
     return {std::to_wstring(row.at("id").get<uint64_t>()),mailHistoryTime(row.value("reported_unix_ms",row.at("unix_ms").get<uint64_t>())),
         row.contains("side")?std::to_wstring(row.at("side").get<unsigned>()+1):L"",
         rankingWide(row.value("name",std::string{})),slot>=0?std::to_wstring(slot+1):L"",
@@ -29,7 +52,29 @@ inline std::array<std::wstring,14> activityCells(const nlohmann::json& row){
         row.contains("configured_points")?std::to_wstring(row.at("configured_points").get<int>()):L"",
         row.contains("points_delta")?std::to_wstring(row.at("points_delta").get<uint32_t>()):L"",
         row.contains("points_total")?std::to_wstring(row.at("points_total").get<uint32_t>()):L"",
-        rankingWide(row.value("point_status",std::string{}))};
+        status};
+}
+inline std::wstring creditTrialDetail(const nlohmann::json& row){
+    if(!row.contains("credit_trial_session")&&!row.contains("credit_episode"))return L"";
+    auto value=[&](const char* key){return row.contains(key)&&!row.at(key).is_null()?rankingWide(row.at(key).dump()):std::wstring(L"未確認");};
+    const auto scope=row.value("credit_trial_scope",std::string{});
+    const std::wstring title=scope=="automatic-match-settlement"?L"対戦分と今回接続の自動精算":scope=="automatic-mail-access"?L"メール接続の自動消費":scope=="reviewed-reset-one-shot"?L"確認済みリセットの一回限り精算":
+        scope=="manual-one-shot"?L"手動度数試験":L"度数試験（旧記録・種別未記録）";
+    return L"\r\n"+title+((scope=="automatic-mail-access"||scope=="automatic-match-settlement")?L"（明示的に有効化したサーバー方針）":L"（通常の自動課金ではありません）")+L"　セッション: "+value("credit_trial_session")+
+        L"\r\n要求度数: "+value("requested_credits")+L"　ROM消費実績: "+value("consumed_credits")+
+        L"\r\n接続時残度数: "+value("credits_before")+L"　消費後残度数: "+value("remaining_credits")+
+        L"\r\n精算エピソード: "+(row.contains("credit_episode")?rankingWide(row.at("credit_episode").get<std::string>()):L"未記録")+
+        L"\r\n記録時の台帳状態: "+(row.contains("credit_settlement_state")?rankingWide(row.at("credit_settlement_state").get<std::string>()):L"未記録（ROM実績とは別）");
+}
+inline std::wstring creditBindingDetail(const nlohmann::json& row){
+    if(!row.contains("credit_binding_candidates"))return L"";
+    const auto& audit=row.at("credit_binding_candidates");
+    std::wstring text=L"\r\n対戦照合: 未検証・自動消費なし　候補数: "+std::to_wstring(audit.at("candidates").size())+
+        L"\r\n照合状態: "+rankingWide(audit.at("status").get<std::string>())+L"\r\n候補の接続履歴ID: ";
+    bool first=true;for(const auto& candidate:audit.at("candidates")){
+        if(!first)text+=L", ";first=false;text+=std::to_wstring(candidate.at("activity_record_id").get<uint64_t>());
+    }
+    return text+L"\r\n候補1件でも自動確定しません。接続履歴IDは精算エピソードIDではありません。";
 }
 class ActivityHistoryWindow {
     using J=nlohmann::json;
@@ -56,7 +101,7 @@ class ActivityHistoryWindow {
                 (row.contains("reporting_profile")?L"\r\n報告時の選択ユーザー: "+rankingWide(row.value("reporting_name",std::string{}))+L"　枠: "+std::to_wstring(row.at("reporting_profile").get<unsigned>()+1):L"")+
                 (row.contains("match_connection_id")?L"\r\n照合先の対戦接続履歴ID: "+std::to_wstring(row.at("match_connection_id").get<uint64_t>()):L"")+
                 (row.contains("local_result")?L"　自分: "+std::to_wstring(row.at("local_result").get<uint32_t>())+L"　相手: "+std::to_wstring(row.at("remote_result").get<uint32_t>()):L"")+
-                L"\r\n"+rankingWide(row.value("detail",std::string{}));
+                creditTrialDetail(row)+creditBindingDetail(row)+L"\r\n"+rankingWide(row.value("detail",std::string{}));
         }
         SetWindowTextW(detail,text.c_str());
     }

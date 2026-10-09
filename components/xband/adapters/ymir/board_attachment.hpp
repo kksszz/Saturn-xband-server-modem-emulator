@@ -18,6 +18,8 @@ public:
         std::function<void(uint32_t,uint8_t)> uartWrite;
         // Optional card overlay and diagnostics. Debug accesses bypass all hooks.
         std::function<uint32_t(uint32_t,unsigned,uint32_t)> overlayRead;
+        // Return true only when an optional device owns this write.
+        std::function<bool(uint32_t,unsigned,uint32_t)> overlayWrite;
         std::function<void(uint32_t,unsigned,uint32_t)> observedRead;
         std::function<void(uint32_t,unsigned,uint32_t)> observedWrite;
     };
@@ -68,6 +70,7 @@ public:
         if(width!=1&&width!=2&&width!=4)throw std::invalid_argument("modem board write width");
         if(poke||!enabled){fallbackWrite(a,value,width,poke);return;}
         if(hooks.observedWrite)hooks.observedWrite(a,width,value);
+        if(hooks.overlayWrite&&hooks.overlayWrite(a,width,value))return;
         if(!registers.writeBoard(a,value,width,hooks.mode(),hooks.uartWrite))
             fallbackWrite(a,value,width,false);
     }

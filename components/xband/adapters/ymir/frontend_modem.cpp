@@ -8,6 +8,7 @@
 #include <xband/xos_phone_check.hpp>
 #include <xband/xos_standby_observer.hpp>
 #include <xband/peer_dial_gate.hpp>
+#include <xband/virtual_media_card.hpp>
 #include "board_attachment.hpp"
 #include "flash_storage.hpp"
 #include <ymir/sys/saturn.hpp>
@@ -24,11 +25,28 @@ using Json=nlohmann::json;
 struct FrontendModem::Impl {
     mutable std::mutex mutex;
     std::optional<Config> requested;
+    std::optional<bool> requestedCardInsertion;
+    std::optional<std::filesystem::path> requestedCardImage;
     Snapshot published;
     Config config;
     ymir::Saturn *saturn=nullptr;
     ModemRegisterBank bank;
     std::unique_ptr<FlashStorage> storage;
+    std::unique_ptr<VirtualCardStorage> cardStorage;
+    VirtualMediaCard card;
+    bool cardSaveFailed=false;
+    void loadCard(const std::filesystem::path &path){
+        if(cardStorage||enabled)throw std::runtime_error("Load virtual card once while modem is disconnected");
+        auto storage=std::make_unique<VirtualCardStorage>(path);
+        if(!storage->loaded())throw std::runtime_error("Explicit existing13-byte virtual card image required");
+        card.data=*storage->loaded();card.setInserted(false);cardStorage=std::move(storage);publish();
+    }
+    void saveCard(){
+        if(cardStorage&&!cardSaveFailed){
+            try{cardStorage->save(card.data);}
+            catch(...){cardSaveFailed=true;card.setInserted(false);throw;}
+        }
+    }
     unsigned storageFrames=0;
     void saveFlash() {
         if(!storage||bank.programBytes)return;
@@ -109,7 +127,7 @@ struct FrontendModem::Impl {
         }
         return localDialRole(number,config.side,serviceBegun);
     }
-    void publish(){std::lock_guard lock(mutex);published={enabled,peer||(session&&session->carrier()),frame,sent,received,status};}
+    void publish(){std::lock_guard lock(mutex);published={enabled,peer||(session&&session->carrier()),frame,sent,received,status,bool(cardStorage),card.present};}
     void stop(const char *reason){
         enabled=false;failed=false;peer=false;clockReady=false;needStep=false;sample=false;
         session.reset();service.reset();control.reset();buffer.reset();peerTX.clear();bank.rx.clear();
@@ -125,6 +143,7 @@ struct FrontendModem::Impl {
     void start(Config c){
         stop("Starting");config=std::move(c);
         if(!config.enabled)return;
+        if(cardSaveFailed)throw std::runtime_error("Virtual card save failed; restart required, no retry");
         if(config.side<0||config.side>1||config.port<1||config.port>65530)throw std::invalid_argument("Invalid endpoint or port");
         const auto expected=config.side?"3336666665":"3336666666";
         if(digits(config.phone)!=expected)throw std::invalid_argument("Preview server requires phone 3336666666 (1) or 3336666665 (2)");
@@ -215,6 +234,13 @@ struct FrontendModem::Impl {
     void attach(ymir::Saturn &s){
         if(board)throw std::logic_error("Modem already attached");saturn=&s;
         BoardAttachment::Hooks hooks;
+        hooks.overlayRead=[this](uint32_t a,unsigned width,uint32_t value){
+            return cardStorage&&a==0x05885025&&width==1?uint32_t(card.read(uint8_t(value))):value;
+        };
+        hooks.overlayWrite=[this](uint32_t a,unsigned width,uint32_t value){
+            if(!cardStorage||a!=0x05885021||width!=1)return false;
+            card.write(uint8_t(value));return true;
+        };
         if(trace)hooks.observedRead=[this](uint32_t a,unsigned width,uint32_t){if(a==0x05885029&&width==1)++idReads;};
         hooks.mode=[] {return ModemRegisterBank::BoardMode{true,true,true,true};};
         hooks.uartRead=[this](uint32_t a){try{return uartRead(a);}catch(const std::exception&e){fail(e.what());return uint8_t(0);}};
@@ -348,6 +374,18 @@ struct FrontendModem::Impl {
     }
     bool pump(){
         try{
+            // Persist card changes before releasing any queued service response.
+            // No filesystem calls occur from mapped register callbacks.
+            saveCard();
+            std::optional<bool> insertion;
+            std::optional<std::filesystem::path> image;
+            {std::lock_guard lock(mutex);insertion=requestedCardInsertion;requestedCardInsertion.reset();
+             image=std::move(requestedCardImage);requestedCardImage.reset();}
+            if(image)loadCard(*image);
+            if(insertion){
+                if(!cardStorage||cardSaveFailed)throw std::runtime_error("Virtual card unavailable");
+                card.setInserted(*insertion);publish();
+            }
             std::optional<Config> next;{std::lock_guard lock(mutex);next=std::move(requested);requested.reset();}
             if(next)start(std::move(*next));
             if(!enabled)return true;
@@ -432,9 +470,23 @@ void FrontendModem::configureStorage(const std::filesystem::path &path){
     if(storage->loaded())impl->bank.flashData=*storage->loaded();
     impl->storage=std::move(storage);
 }
+void FrontendModem::configureVirtualCard(const std::filesystem::path &path,bool inserted){
+    impl->loadCard(path);
+    impl->card.setInserted(inserted); // Explicit startup trial only; default remains ejected.
+    impl->publish();
+}
+void FrontendModem::requestCardImage(std::filesystem::path path){
+    std::lock_guard lock(impl->mutex);impl->requestedCardImage=std::move(path);
+}
+void FrontendModem::requestCardInsertion(bool inserted){
+    std::lock_guard lock(impl->mutex);impl->requestedCardInsertion=inserted;
+}
 void FrontendModem::request(Config c){std::lock_guard lock(impl->mutex);impl->requested=std::move(c);}
 FrontendModem::Snapshot FrontendModem::snapshot()const{std::lock_guard lock(impl->mutex);return impl->published;}
-bool FrontendModem::hasPendingRequest()const{std::lock_guard lock(impl->mutex);return impl->requested.has_value();}
+bool FrontendModem::hasPendingRequest()const{
+    std::lock_guard lock(impl->mutex);
+    return impl->requested.has_value()||impl->requestedCardInsertion.has_value()||impl->requestedCardImage.has_value();
+}
 bool FrontendModem::pump(){return impl->pump();}
 void FrontendModem::waitForActivity(){
     if(!impl->enabled||!impl->service||!impl->control)return;
@@ -456,10 +508,15 @@ void FrontendModem::frameCompleted(){
 uint64_t FrontendModem::budget(uint64_t c,uint64_t r)noexcept{return impl->budget(c,r);}
 void FrontendModem::reset(const char*r){
     // A queued UI connect must not resurrect a pre-rewind network session.
-    {std::lock_guard lock(impl->mutex);impl->requested.reset();}
+    {std::lock_guard lock(impl->mutex);impl->requested.reset();impl->requestedCardInsertion.reset();impl->requestedCardImage.reset();}
+    impl->card.resetPins(); // Never rewind persistent card bytes with guest state.
     if(impl->enabled)impl->stop(r);
 }
-void FrontendModem::shutdown(){impl->saveFlash();impl->stop("Disabled");}
+void FrontendModem::shutdown(){
+    impl->saveFlash();
+    try{impl->saveCard();}catch(const std::exception&e){impl->fail(e.what());}
+    impl->stop("Disabled");
+}
 void FrontendModem::dumpFlash(std::ostream &out) const {
     impl->bank.dumpFlash(out);
 }

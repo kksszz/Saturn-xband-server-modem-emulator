@@ -16,6 +16,9 @@ $taskVariables=@{
     XBAND_GAME_LEVEL_FILE=(Join-Path $taskRuntime 'game-level-settings.json')
     XBAND_USAGE_AREA_FILE=(Join-Path $taskRuntime 'usage-area-settings.json')
     XBAND_STANDBY_WAIT_FILE=(Join-Path $taskRuntime 'standby-wait-settings.json')
+    XBAND_SERVICE_CREDIT_FILE=(Join-Path $taskRuntime 'service-credit-settings.json')
+    XBAND_SERVICE_CREDIT_LEDGER_FILE=(Join-Path $taskRuntime 'service-credit-settlements.json')
+    XBAND_MATCH_CREDIT_EPISODES_FILE=(Join-Path $taskRuntime 'match-credit-episodes.json')
     XBAND_STANDBY='1';XBAND_POSTMATCH_EXPERIMENT='0'
 }
 $taskSaved=@{}

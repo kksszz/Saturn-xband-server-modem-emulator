@@ -47,12 +47,19 @@ public:
         return state.at("accounts").value(key,uint32_t{});
     }
     void observe(ActivityHistory& history,J context,const LocalTCPProbe::Bytes& request,const GameRankingSettings& settings){
-        const auto game=receivedGameID(request);if(!game)return;
-        const auto rows=settings.snapshot();if(std::none_of(rows.begin(),rows.end(),[&](const auto&r){return r.gameID==*game;}))return;
+        const auto registrationGame=receivedGameID(request);
         const auto result=LocalTCPProbe::observedGameResult(request);
+        // Command20 is terminal-wide and can survive a disc/user switch.
+        // Score its own game, using the existing carrier/participant audit;
+        // the current registration only selects the service response title.
+        const auto game=result.empty()?registrationGame:std::optional<uint32_t>(LocalTCPProbe::longword(result,4));
+        if(!game)return;
+        const auto rows=settings.snapshot();if(std::none_of(rows.begin(),rows.end(),[&](const auto&r){return r.gameID==*game;}))return;
+        if(registrationGame&&*registrationGame!=*game)context["reporting_game"]=*registrationGame;
+        context["game"]=*game;
+        for(const auto& row:rows)if(row.gameID==*game)context["title"]=row.fields[0];
         J audit;
         const auto hash=result.empty()?std::string{}:pointFingerprint(result);
-        if(!result.empty()&&LocalTCPProbe::longword(result,4)!=*game)throw std::runtime_error("Result/registration game mismatch");
         if(!hash.empty())for(size_t page=0;;++page){const auto batch=history.page(page);
             for(const auto& row:batch.at("rows"))if(row.value("event",std::string{})=="points_result"&&row.value("report_fingerprint",std::string{})==hash&&
                 row.value("attribution_version",0)==2&&row.value("phone",std::string{})==context.at("phone").get<std::string>()&&row.value("game",0u)==*game){audit=row;break;}

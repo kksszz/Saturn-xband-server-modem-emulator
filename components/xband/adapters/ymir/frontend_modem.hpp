@@ -11,12 +11,19 @@ namespace xband::ymir_adapter {
 class FrontendModem {
 public:
     struct Config {bool enabled=false,allowLAN=false;int side=0,port=58240;std::string address="127.0.0.1",phone="3336666666";};
-    struct Snapshot {bool enabled=false,carrier=false;unsigned frame=0;uint64_t sent=0,received=0;std::string status="Disabled";};
+    struct Snapshot {bool enabled=false,carrier=false;unsigned frame=0;uint64_t sent=0,received=0;std::string status="Disabled";bool virtualCardConfigured=false,virtualCardInserted=false;};
     FrontendModem();~FrontendModem();
     void attach(ymir::Saturn &saturn);
     // Call during frontend initialization, before emulator thread starts.
     // On error, persistence stays disabled and existing files are untouched.
     void configureStorage(const std::filesystem::path &path);
+    // Experimental explicit13-byte card file, before emulator thread starts.
+    // Requires an existing image; never creates identity, balance or recharge.
+    void configureVirtualCard(const std::filesystem::path &path,bool inserted=false);
+    // UI-safe load request, requires disconnected modem and no configured card.
+    void requestCardImage(std::filesystem::path path);
+    // Thread-safe insertion request, applied at the next owner-thread pump.
+    void requestCardInsertion(bool inserted);
     void request(Config config);
     Snapshot snapshot()const;
     bool hasPendingRequest()const;

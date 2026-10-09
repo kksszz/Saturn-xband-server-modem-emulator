@@ -49,4 +49,20 @@ inline std::string registrationPhone(std::span<const uint8_t> b){
     if(phoneDigits(phone).empty())throw std::runtime_error("Invalid registration phone field");
     return phone;
 }
+// Original Saturn 0602CCAC report: 1E,00,signed BE16,BE32 length,raw bytes.
+// Framing only; neither the balance nor the card identity is authenticated.
+inline size_t registrationCardLength(std::span<const uint8_t> b){
+    const auto card=registrationOffset(b,135);
+    if(card>b.size()||b.size()-card<8||b[card]!=0x1e||b[card+1]!=0)
+        throw std::runtime_error("Incomplete or unsupported registration card header");
+    uint32_t length=0;
+    for(size_t i=card+4;i<card+8;++i)length=(length<<8)|b[i];
+    if((length!=0&&length!=13)||length>b.size()-card-8)
+        throw std::runtime_error("Incomplete or unsupported registration card data");
+    return length;
+}
+inline size_t registrationAfterCardOffset(std::span<const uint8_t> b,size_t original){
+    if(original<143)throw std::runtime_error("Not a post-card registration field");
+    return registrationOffset(b,original)+registrationCardLength(b);
+}
 }
