@@ -38,7 +38,7 @@ class CardDebitTrialWindow {
                     const auto amount=number(2,32767),seconds=number(3,300);
                     if(!seconds)throw std::runtime_error("Specify a positive timeout");
                     s->trials->reserve(s->side(),uint32_t(amount),uint64_t(seconds)*1000);
-                    SetWindowTextW(s->note,L"一回だけ予約しました。仮想カードを挿した対象端末で接続してください。");
+                    SetWindowTextW(s->note,L"一回だけ予約しました。仮想メディカカードを挿した対象端末で接続してください。");
                 }
                 if(id==5){s->trials->continueTrial(s->side());SetWindowTextW(s->note,L"継続を要求しました。消費要求の再送・補充はしません。");}
                 s->refresh();
@@ -56,13 +56,13 @@ public:
         if(window){if(show){ShowWindow(window,SW_SHOW);SetForegroundWindow(window);}return;}
         WNDCLASSW c{};c.lpfnWndProc=proc;c.hInstance=GetModuleHandleW(nullptr);c.lpszClassName=L"XbandCardDebitTrial";
         c.hCursor=LoadCursor(nullptr,IDC_ARROW);c.hbrBackground=GetSysColorBrush(COLOR_BTNFACE);RegisterClassW(&c);
-        window=CreateWindowW(c.lpszClassName,L"XBAND | 仮想カード消費試験（一回限り）",WS_OVERLAPPED|WS_CAPTION|WS_SYSMENU,
+        window=CreateWindowW(c.lpszClassName,L"XBAND | 仮想メディカカード消費試験（一回限り）",WS_OVERLAPPED|WS_CAPTION|WS_SYSMENU,
             CW_USEDEFAULT,CW_USEDEFAULT,720,510,owner,nullptr,c.hInstance,this);
         if(!window)throw std::runtime_error("Cannot create card debit trial window");
         auto control=[&](const wchar_t* cls,const wchar_t* label,DWORD style,int x,int y,int width,int height,int id){
             auto h=CreateWindowW(cls,label,WS_CHILD|WS_VISIBLE|style,x,y,width,height,window,reinterpret_cast<HMENU>(INT_PTR(id)),c.hInstance,nullptr);
             SendMessageW(h,WM_SETFONT,reinterpret_cast<WPARAM>(GetStockObject(DEFAULT_GUI_FONT)),TRUE);return h;};
-        control(L"STATIC",L"実際に仮想カードの度数を減らす診断操作です。通常料金の設定ではありません。\n未送信の新しい接続に一回だけ49を送ります。自動再送・返還・次回の再実行はしません。",0,18,16,670,48,0);
+        control(L"STATIC",L"実際に仮想メディカカードの度数を減らす診断操作です。通常料金の設定ではありません。\n未送信の新しい接続に一回だけ49を送ります。自動再送・返還・次回の再実行はしません。",0,18,16,670,48,0);
         control(L"STATIC",L"対象端末",0,18,88,100,22,0);
         auto combo=control(L"COMBOBOX",L"",CBS_DROPDOWNLIST|WS_TABSTOP,130,82,180,140,1);
         SendMessageW(combo,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(L"端末1（左）"));
