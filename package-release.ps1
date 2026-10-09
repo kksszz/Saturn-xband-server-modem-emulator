@@ -15,7 +15,6 @@ $taskMapping=@{
     'docs/SERVER-MODEM-SPEC.md'='docs/SERVER-MODEM-SPEC.md'
     'docs/SERVER-UI-MANUAL.md'='docs/SERVER-UI-MANUAL.md'
     'docs/images/system-architecture.svg'='docs/images/system-architecture.svg'
-    'docs/SERVER-MODEM-SPEC-v0.1.0-ja.pdf'='docs/SERVER-MODEM-SPEC-v0.1.0-ja.pdf'
     'docs/BATTLE-CABLE-SERIAL-SPEC.md'='docs/BATTLE-CABLE-SERIAL-SPEC.md'
     'docs/LICENSE-nlohmann-json.txt'='docs/LICENSE-nlohmann-json.txt'
 }
