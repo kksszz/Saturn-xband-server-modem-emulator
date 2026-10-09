@@ -1,0 +1,3451 @@
+diff --git a/apps/ymir-sdl3/CMakeLists.txt b/apps/ymir-sdl3/CMakeLists.txt
+index 0cd7161..37fb923 100644
+--- a/apps/ymir-sdl3/CMakeLists.txt
++++ b/apps/ymir-sdl3/CMakeLists.txt
+@@ -1,4 +1,5 @@
+ ## Create the executable target
++set(Ymir_XBAND_COMPONENTS_DIR "" CACHE PATH "Optional private XBAND component source directory")
+ add_executable(ymir-sdl3
+     src/main.cpp
+     src/winmain.cpp
+@@ -64,6 +65,8 @@ add_executable(ymir-sdl3
+     src/app/services/graphics_service.hpp
+     src/app/services/midi_service.cpp
+     src/app/services/midi_service.hpp
++    src/app/services/link_cable_service.cpp
++    src/app/services/link_cable_service.hpp
+     src/app/services/midi_types.hpp
+     src/app/services/save_state_service.cpp
+     src/app/services/save_state_service.hpp
+@@ -256,6 +259,8 @@ add_executable(ymir-sdl3
+     src/app/ui/views/settings/ipl_settings_view.hpp
+     src/app/ui/views/settings/mission_stick_config_view.cpp
+     src/app/ui/views/settings/mission_stick_config_view.hpp
++    src/app/ui/views/settings/serial_port_settings_view.cpp
++    src/app/ui/views/settings/serial_port_settings_view.hpp
+     src/app/ui/views/settings/settings_view_base.cpp
+     src/app/ui/views/settings/settings_view_base.hpp
+     src/app/ui/views/settings/shuttle_mouse_config_view.cpp
+@@ -572,11 +577,18 @@ target_link_libraries(ymir-sdl3 PRIVATE
+ if (WIN32)
+     target_link_libraries(ymir-sdl3 PRIVATE
+         Dwmapi
++        ws2_32
+ 
+         WIL::WIL
+     )
+ endif ()
+ target_compile_features(ymir-sdl3 PUBLIC cxx_std_20)
++if(WIN32 AND Ymir_XBAND_COMPONENTS_DIR)
++    target_sources(ymir-sdl3 PRIVATE "${Ymir_XBAND_COMPONENTS_DIR}/adapters/ymir/frontend_modem.cpp")
++    target_include_directories(ymir-sdl3 PRIVATE "${Ymir_XBAND_COMPONENTS_DIR}/include" "${Ymir_XBAND_COMPONENTS_DIR}/adapters/ymir")
++    target_compile_definitions(ymir-sdl3 PRIVATE YMIR_XBAND_FRONTEND=1)
++    target_link_libraries(ymir-sdl3 PRIVATE bcrypt iphlpapi)
++endif()
+ 
+ ## Create embedded resource library
+ cmrc_add_resource_library(ymir-sdl3-rc
+diff --git a/apps/ymir-sdl3/src/app/app.cpp b/apps/ymir-sdl3/src/app/app.cpp
+index 9a6baee..b25839e 100644
+--- a/apps/ymir-sdl3/src/app/app.cpp
++++ b/apps/ymir-sdl3/src/app/app.cpp
+@@ -129,6 +129,8 @@
+ #include <rtmidi/RtMidi.h>
+ 
+ #include <clocale>
++#include <cstdio>
++#include <cstdlib>
+ #include <mutex>
+ #include <numbers>
+ #include <span>
+@@ -166,7 +168,7 @@ App::App()
+                     })
+     , m_displayService(m_context, m_settings)
+     , m_fileDialogService(m_context, m_settings)
+-    , m_windowManagerService(m_context, m_settings)
++    , m_windowManagerService(m_context, m_settings, m_linkCableService)
+     , m_inputService(m_context, m_settings,
+                      {.openSettings =
+                           [this]() {
+@@ -184,6 +186,9 @@ App::App()
+     m_context.serviceLocator.Register(m_saveStateService);
+     m_context.serviceLocator.Register(m_midiService);
+     m_context.serviceLocator.Register(m_settings);
++#ifdef YMIR_XBAND_FRONTEND
++    m_context.serviceLocator.Register(m_modem);
++#endif
+     m_context.serviceLocator.Register(m_screenshotService);
+     m_context.serviceLocator.Register(m_updateCheckerService);
+     m_context.serviceLocator.Register(m_mouseCaptureService);
+@@ -453,6 +458,10 @@ int App::Run(const CommandLineOptions &options) {
+         }
+     }
+ 
++    // Both hardware SCI endpoints are exposed; no game-specific routing setting.
++    m_linkCableService.SetDualSCI(true);
++    m_linkCableService.SetSynchronized(m_settings.general.linkSynchronization == 1);
++
+     devlog::debug<grp::base>("Profile directory: {}", m_context.profile.GetPath(ProfilePath::Root));
+ 
+     // Apply settings
+@@ -1051,8 +1060,9 @@ void App::RunEmulator() {
+             ++screen.VDP1Frames;
+         });
+ 
+-        callbacks.VDP2DrawFinished.Bind(&m_context, [](void *ctx) {
+-            auto &sharedCtx = *static_cast<SharedContext *>(ctx);
++        callbacks.VDP2DrawFinished.Bind(this, [](void *ctx) {
++            auto &app = *static_cast<App *>(ctx);
++            auto &sharedCtx = app.m_context;
+             auto &screen = sharedCtx.screen;
+             ++screen.VDP2Frames;
+ 
+@@ -1206,6 +1216,96 @@ void App::RunEmulator() {
+     m_context.saturn.instance->SMPC.GetPeripheralPort2().SetPeripheralReportCallback(
+         util::MakeClassMemberOptionalCallback<&services::InputService::ReadPeripheral<2>>(&m_inputService));
+ 
++    // Opt-in passive XBAND investigation. The usual cable build never enables it.
++    const char *xbandTrace = std::getenv("YMIR_XBAND_TRACE");
++    if (xbandTrace && std::string_view(xbandTrace) == "1") {
++        const auto stamp = std::chrono::duration_cast<std::chrono::microseconds>(
++            std::chrono::system_clock::now().time_since_epoch()).count();
++        const auto path = m_context.profile.GetPath(ProfilePath::PersistentState) /
++            ("xband-access-" + std::to_string(stamp) + ".csv");
++        if (m_xbandAccessLogger.Start(path)) {
++            auto installTrace = [this]<bool master>() {
++                auto &cpu = master ? m_context.saturn.instance->masterSH2 : m_context.saturn.instance->slaveSH2;
++                cpu.SetModemAccessTrace({this, [](bool write, uint32 address, uint32 value, uint8 width,
++                                                 uint32 pc, uint64 cycle, void *ctx) {
++                    auto &app = *static_cast<App *>(ctx);
++                    app.m_xbandAccessLogger.Record(master, write, address, value, width, pc, cycle);
++                    // Capture a bounded code window without changing emulated reads.
++                    static unsigned snapshots = 0;
++                    if (!write && (address & 0x07FFFFFF) == 0x04FFFFFF && snapshots++ < 16 && pc >= 64) {
++                        auto &saturn = *app.m_context.saturn.instance;
++                        auto &probe = (master ? saturn.masterSH2 : saturn.slaveSH2).GetProbe();
++                        for (uint32 a = (pc - 64) & ~1u; a < pc + 192; a += 2) {
++                            app.m_xbandAccessLogger.Record(master, false, a, probe.MemPeekWord(a, true),
++                                                           2, pc, cycle, true);
++                        }
++                    }
++                }});
++            };
++            installTrace.template operator()<true>();
++            installTrace.template operator()<false>();
++            m_context.DisplayMessage("XBAND passive trace enabled (modem not emulated)");
++        } else {
++            m_context.DisplayMessage("Could not open XBAND access trace");
++        }
++    }
++
++    // Distinct wire lanes and receive queues: an inactive CPU cannot drain the
++    // other CPU's input, and transmitting on both never merges their streams.
++    auto installSCI = [this]<bool master>() {
++        auto &cpu = master ? m_context.saturn.instance->masterSH2 : m_context.saturn.instance->slaveSH2;
++        cpu.SetSCITransmitCallback({this, [](uint8 value, void *ctx) {
++            auto &app = *static_cast<App *>(ctx);
++            auto &saturn = *app.m_context.saturn.instance;
++            auto &cpu = master ? saturn.masterSH2 : saturn.slaveSH2;
++            app.m_linkCableService.TransmitSCI(master, value, cpu.GetExecutionCycleCount());
++        }});
++        cpu.SetSCIReceiveCallback({this, [](void *ctx) -> std::optional<uint8> {
++            auto &app = *static_cast<App *>(ctx);
++            auto &saturn = *app.m_context.saturn.instance;
++            auto &cpu = master ? saturn.masterSH2 : saturn.slaveSH2;
++            return app.m_linkCableService.ReceiveSCI(master, cpu.GetExecutionCycleCount());
++        }});
++    };
++    installSCI.template operator()<false>();
++    installSCI.template operator()<true>();
++#ifdef YMIR_XBAND_FRONTEND
++    m_modem.attach(*m_context.saturn.instance);
++    try {
++        m_modem.configureStorage(m_context.profile.GetPath(ProfilePath::PersistentState) / "xband-modem-flash.bin");
++    } catch (const std::exception &e) {
++        devlog::warn<grp::base>("XBAND modem persistence disabled: {}", e.what());
++    }
++#endif
++    if (m_linkCableService.UsesSynchronization()
++#ifdef YMIR_XBAND_FRONTEND
++        || true
++#endif
++    ) {
++        m_context.saturn.instance->SetExecutionBudgetCallback({this, [](uint64 cycle, uint64 revision, void *ctx) {
++            auto &app = *static_cast<App *>(ctx);
++            auto &saturn = *app.m_context.saturn.instance;
++#ifdef YMIR_XBAND_FRONTEND
++            const auto modemBudget=app.m_modem.budget(cycle,revision);
++            if(modemBudget!=~uint64{0})return modemBudget;
++#endif
++            if (app.m_linkCableService.GetState() != services::LinkCableService::State::Connected) return ~uint64{0};
++            if (saturn.configuration.system.sh2ClockFactor != Ratio::One()) {
++                app.m_linkCableService.AbortSynchronization("Sync preview requires the stock SH-2 clock factor");
++                return ~uint64{0};
++            }
++            const uint32 clockTag = (uint32(saturn.GetVideoStandard()) << 1) | uint32(saturn.GetClockSpeed());
++            return app.m_linkCableService.AdvanceSynchronized(cycle, revision, clockTag, [&] {
++                // Let the GUI render the last frame and enqueue stop/pause/settings events.
++                if (app.m_context.screen.videoSync) app.m_context.screen.frameReadyEvent.Set();
++                return app.m_context.eventQueues.emulator.size_approx() != 0;
++            });
++        }});
++    }
++    if (m_options.autoConnectLocalLink) {
++        m_windowManagerService.SettingsWindow().EnableLocalAutoLink();
++    }
++
+     auto &inputContext = m_context.inputContext;
+ 
+     m_context.paused = m_options.startPaused || settings.general.startPaused;
+@@ -1357,6 +1457,11 @@ void App::RunEmulator() {
+ 
+     bool imguiWantedKeyboardInput = false;
+     bool imguiWantedMouseInput = false;
++    const char *inputTraceSetting = std::getenv("YMIR_XBAND_INPUT_TRACE");
++    const bool traceXbandInput = inputTraceSetting != nullptr && inputTraceSetting[0] == '1' &&
++                                 inputTraceSetting[1] == '\0';
++    const char *inputTraceSideSetting = std::getenv("YMIR_XBAND_ENDPOINT");
++    const int inputTraceSide = inputTraceSideSetting != nullptr ? std::atoi(inputTraceSideSetting) : -1;
+ 
+     auto prevTime = clk::now();
+ 
+@@ -1365,6 +1470,10 @@ void App::RunEmulator() {
+         bool forceScreenScale = false;
+         int forcedScreenScale = 1;
+ 
++        for (const std::string &message : m_linkCableService.TakeNotifications()) {
++            m_context.DisplayMessage(message);
++        }
++
+         // Configure video sync
+         const bool fullScreen = settings.video.fullScreen;
+         const bool videoSync =
+@@ -1526,6 +1635,12 @@ void App::RunEmulator() {
+                 break;
+             case SDL_EVENT_KEY_DOWN: [[fallthrough]];
+             case SDL_EVENT_KEY_UP:
++                if (traceXbandInput && !evt.key.repeat) {
++                    std::fprintf(stderr, "XBAND_SDL_KEY side=%d scancode=%u pressed=%d capture=%d capturing=%d window=%u\n",
++                                 inputTraceSide, static_cast<unsigned>(evt.key.scancode), evt.key.down,
++                                 io.WantCaptureKeyboard, inputContext.IsCapturing(), evt.key.windowID);
++                    std::fflush(stderr);
++                }
+                 if (!io.WantCaptureKeyboard || inputContext.IsCapturing()) {
+                     // TODO: consider supporting multiple keyboards (evt.key.which)
+                     inputContext.ProcessPrimitive(input::SDL3ScancodeToKeyboardKey(evt.key.scancode),
+@@ -1648,6 +1763,12 @@ void App::RunEmulator() {
+             case SDL_EVENT_GAMEPAD_BUTTON_DOWN: [[fallthrough]];
+             case SDL_EVENT_GAMEPAD_BUTTON_UP: //
+             {
++                if (traceXbandInput) {
++                    std::fprintf(stderr, "XBAND_SDL_GAMEPAD side=%d device=%u button=%u pressed=%d\n",
++                                 inputTraceSide, static_cast<unsigned>(evt.gbutton.which),
++                                 static_cast<unsigned>(evt.gbutton.button), evt.gbutton.down);
++                    std::fflush(stderr);
++                }
+                 const int playerIndex = gamepadPlayerIndices.GetPlayerIndex(evt.gbutton.which);
+                 inputContext.ProcessPrimitive(
+                     playerIndex, input::SDL3ToGamepadButton((SDL_GamepadButton)evt.gbutton.button), evt.gbutton.down);
+@@ -1704,6 +1825,11 @@ void App::RunEmulator() {
+                 break;
+ 
+             case SDL_EVENT_WINDOW_FOCUS_GAINED:
++                if (traceXbandInput) {
++                    std::fprintf(stderr, "XBAND_SDL_FOCUS side=%d focused=1 window=%u\n", inputTraceSide,
++                                 evt.window.windowID);
++                    std::fflush(stderr);
++                }
+                 if (settings.general.pauseWhenUnfocused) {
+                     if (m_context.paused && pausedByLostFocus) {
+                         m_context.EnqueueEvent(events::emu::SetPaused(false));
+@@ -1712,6 +1838,11 @@ void App::RunEmulator() {
+                 }
+                 break;
+             case SDL_EVENT_WINDOW_FOCUS_LOST:
++                if (traceXbandInput) {
++                    std::fprintf(stderr, "XBAND_SDL_FOCUS side=%d focused=0 window=%u\n", inputTraceSide,
++                                 evt.window.windowID);
++                    std::fflush(stderr);
++                }
+                 if (settings.general.pauseWhenUnfocused) {
+                     if (!m_context.paused) {
+                         pausedByLostFocus = true;
+@@ -2607,6 +2738,9 @@ void App::RunEmulator() {
+                     if (ImGui::MenuItem("CD Block")) {
+                         settingsWindow.OpenTab(ui::SettingsTab::CDBlock);
+                     }
++                    if (ImGui::MenuItem("Serial Port")) {
++                        settingsWindow.OpenTab(ui::SettingsTab::SerialPort);
++                    }
+                     if (ImGui::MenuItem("Tweaks")) {
+                         settingsWindow.OpenTab(ui::SettingsTab::Tweaks);
+                     }
+@@ -3437,22 +3571,35 @@ void App::EmulatorThread() {
+         StepAction stepAction = paused ? StepAction::Noop : StepAction::RunFrame;
+ 
+         // Process all pending events
+-        const size_t evtCount = paused ? m_context.eventQueues.emulator.wait_dequeue_bulk(evts.begin(), evts.size())
++        const size_t evtCount = paused
++#ifdef YMIR_XBAND_FRONTEND
++            && !m_modem.snapshot().enabled && !m_modem.hasPendingRequest()
++#endif
++            ? m_context.eventQueues.emulator.wait_dequeue_bulk(evts.begin(), evts.size())
+                                        : m_context.eventQueues.emulator.try_dequeue_bulk(evts.begin(), evts.size());
+         for (size_t i = 0; i < evtCount; i++) {
+             EmuEvent &evt = evts[i];
+             using enum EmuEvent::Type;
+             switch (evt.type) {
+             case FactoryReset:
++#ifdef YMIR_XBAND_FRONTEND
++                m_modem.reset("Factory reset: restart server pair and reconnect modem");
++#endif
+                 m_context.saturn.instance->FactoryReset();
+                 m_context.DisplayMessage("Factory reset triggered");
+                 break;
+             case HardReset:
++#ifdef YMIR_XBAND_FRONTEND
++                m_modem.reset("Hard reset: restart server pair and reconnect modem");
++#endif
+                 m_context.saturn.instance->Reset(true);
+                 m_context.rewindBuffer.Reset();
+                 m_context.DisplayMessage("Hard reset triggered");
+                 break;
+             case SoftReset:
++#ifdef YMIR_XBAND_FRONTEND
++                m_modem.reset("Soft reset: restart server pair and reconnect modem");
++#endif
+                 m_context.saturn.instance->Reset(false);
+                 m_context.DisplayMessage("Soft reset triggered");
+                 break;
+@@ -3487,6 +3634,7 @@ void App::EmulatorThread() {
+                 m_context.audioSystem.SetSilent(false);
+                 break;
+             case StepMSH2:
++                m_linkCableService.AbortSynchronization("Sync preview disconnected for debugger single stepping");
+                 stepAction = StepAction::StepMSH2;
+                 if (!m_context.paused) {
+                     m_context.paused = true;
+@@ -3495,6 +3643,7 @@ void App::EmulatorThread() {
+                 m_context.audioSystem.SetSilent(true);
+                 break;
+             case StepSSH2:
++                m_linkCableService.AbortSynchronization("Sync preview disconnected for debugger single stepping");
+                 stepAction = StepAction::StepSSH2;
+                 if (!m_context.paused) {
+                     m_context.paused = true;
+@@ -3586,10 +3735,21 @@ void App::EmulatorThread() {
+ 
+             case SetThreadPriority: util::BoostCurrentThreadPriority(std::get<bool>(evt.value)); break;
+ 
+-            case Shutdown: m_context.saturn.instance->VDP.UseNullRenderer(); return;
++            case Shutdown:
++#ifdef YMIR_XBAND_FRONTEND
++                m_modem.shutdown();
++#endif
++                m_context.saturn.instance->VDP.UseNullRenderer(); return;
+             }
+         }
+ 
++#ifdef YMIR_XBAND_FRONTEND
++        const bool modemReady=m_modem.pump();
++        if(m_modem.snapshot().enabled&&m_linkCableService.GetState()==services::LinkCableService::State::Connected)
++            m_modem.reset("Disconnect battle cable before using modem");
++        if(!modemReady){m_context.screen.frameReadyEvent.Set();m_emuProcessEvent.Set();m_modem.waitForActivity();continue;}
++        if(paused&&stepAction==StepAction::Noop&&m_modem.snapshot().enabled)std::this_thread::sleep_for(std::chrono::milliseconds(1));
++#endif
+         // Emulate one frame
+         switch (stepAction) {
+         case StepAction::Noop: break;
+@@ -3608,6 +3768,10 @@ void App::EmulatorThread() {
+                 if (m_context.rewindBuffer.PopState()) {
+                     if (!m_context.saturn.instance->LoadState(m_context.rewindBuffer.NextState)) {
+                         doRunFrame = false;
++                    } else {
++#ifdef YMIR_XBAND_FRONTEND
++                        m_modem.reset("Rewind: reconnect modem with a new server session");
++#endif
+                     }
+                 } else {
+                     doRunFrame = false;
+@@ -3616,6 +3780,14 @@ void App::EmulatorThread() {
+ 
+             if (doRunFrame) [[likely]] {
+                 m_context.saturn.instance->RunFrame();
++                if (m_context.saturn.instance->ExecutionYielded()) {
++                    m_context.screen.frameReadyEvent.Set();
++                    m_emuProcessEvent.Set();
++                    continue; // process events, do not save a partial-frame rewind state
++                }
++#ifdef YMIR_XBAND_FRONTEND
++                m_modem.frameCompleted();
++#endif
+             }
+ 
+             if (rewindEnabled && !m_context.rewinding) {
+diff --git a/apps/ymir-sdl3/src/app/app.hpp b/apps/ymir-sdl3/src/app/app.hpp
+index 53d9398..0b49309 100644
+--- a/apps/ymir-sdl3/src/app/app.hpp
++++ b/apps/ymir-sdl3/src/app/app.hpp
+@@ -1,10 +1,14 @@
+ #pragma once
+ 
+ #include "cmdline_opts.hpp"
++#include "debug/xband_access_logger.hpp"
+ 
+ #include "imgui_data.hpp"
+ #include "settings.hpp"
+ #include "shared_context.hpp"
++#ifdef YMIR_XBAND_FRONTEND
++#include <frontend_modem.hpp>
++#endif
+ 
+ #include "services/disc_service.hpp"
+ #include "services/discord_rpc_service.hpp"
+@@ -13,6 +17,7 @@
+ #include "services/graphics_service.hpp"
+ #include "services/input_service.hpp"
+ #include "services/midi_service.hpp"
++#include "services/link_cable_service.hpp"
+ #include "services/mouse_capture_service.hpp"
+ #include "services/persistence_service.hpp"
+ #include "services/rom_service.hpp"
+@@ -38,10 +43,15 @@ private:
+     CommandLineOptions m_options;
+ 
+     YmirImGuiData m_imguiData;
++#ifdef YMIR_XBAND_FRONTEND
++    ::xband::ymir_adapter::FrontendModem m_modem; // must outlive SharedContext/Saturn
++#endif
+     SharedContext m_context;
+     services::GraphicsService m_graphicsService;
+     services::SaveStateService m_saveStateService;
+     services::MIDIService m_midiService;
++    services::LinkCableService m_linkCableService;
++    xband::XBandAccessLogger m_xbandAccessLogger;
+     services::ScreenshotService m_screenshotService;
+     services::UpdateCheckerService m_updateCheckerService;
+     Settings m_settings;
+diff --git a/apps/ymir-sdl3/src/app/cmdline_opts.hpp b/apps/ymir-sdl3/src/app/cmdline_opts.hpp
+index c95a0f4..420400c 100644
+--- a/apps/ymir-sdl3/src/app/cmdline_opts.hpp
++++ b/apps/ymir-sdl3/src/app/cmdline_opts.hpp
+@@ -12,6 +12,7 @@ struct CommandLineOptions {
+     bool startPaused;
+     bool startFastForward;
+     bool enableDebugTracing;
++    bool autoConnectLocalLink;
+ };
+ 
+ } // namespace app
+diff --git a/apps/ymir-sdl3/src/app/debug/xband_access_logger.hpp b/apps/ymir-sdl3/src/app/debug/xband_access_logger.hpp
+new file mode 100644
+index 0000000..1ee0280
+--- /dev/null
++++ b/apps/ymir-sdl3/src/app/debug/xband_access_logger.hpp
+@@ -0,0 +1,118 @@
++#pragma once
++
++#include <ymir/core/types.hpp>
++#include <chrono>
++#include <condition_variable>
++#include <deque>
++#include <filesystem>
++#include <fstream>
++#include <mutex>
++#include <thread>
++#include <vector>
++
++namespace app::xband {
++
++// Passive, bounded development trace. No emulated modem responses, AT parsing,
++// TCP connection or game patches. Disk I/O stays off the emulation thread.
++class XBandAccessLogger {
++public:
++    ~XBandAccessLogger() { Stop(); }
++    bool Start(const std::filesystem::path &path) {
++        Stop();
++        m_file.open(path, std::ios::out | std::ios::trunc);
++        if (!m_file) return false;
++        m_file << "# xband-passive-v1; no modem emulation; registers are unverified candidates\n"
++               << "# CPU external-bus accesses only; debugger peeks/pokes and SCU DMA excluded\n"
++               << "host_us,cpu,cycle,pc,address,physical,width,rw,value,category,register_candidate\n";
++        m_start = std::chrono::steady_clock::now();
++        m_stop = false;
++        m_accepted = m_dropped = m_smpcAccepted = 0;
++        m_worker = std::thread([this] { Run(); });
++        return true;
++    }
++    void Stop() {
++        {
++            std::lock_guard lock{m_mutex};
++            m_stop = true;
++        }
++        m_cv.notify_all();
++        if (m_worker.joinable()) m_worker.join();
++        if (m_file.is_open()) m_file.close();
++    }
++    void Record(bool master, bool write, uint32 address, uint32 value, uint8 width, uint32 pc, uint64 cycle,
++                bool codeSnapshot = false) {
++        std::lock_guard lock{m_mutex};
++        if (m_stop) return;
++        // Keep busy SMPC polling from consuming the modem investigation budget.
++        const uint32 physical = address & 0x07FFFFFF;
++        const bool smpc = physical >= 0x00100000 && physical <= 0x0010007F;
++        if (smpc && m_smpcAccepted >= 20000) { ++m_dropped; return; }
++        if (m_accepted >= 200000 || m_queue.size() >= 16384) { ++m_dropped; return; }
++        const auto us = std::chrono::duration_cast<std::chrono::microseconds>(
++            std::chrono::steady_clock::now() - m_start).count();
++        m_queue.push_back({us, cycle, pc, address, value, width, master, write, codeSnapshot});
++        ++m_accepted;
++        if (smpc) ++m_smpcAccepted;
++        m_cv.notify_one();
++    }
++private:
++    struct Event {
++        int64_t us; uint64 cycle; uint32 pc, address, value; uint8 width; bool master, write, codeSnapshot;
++    };
++    static const char *Category(uint32 address) {
++        if (address >= 0x00100000 && address <= 0x0010007F) return "SMPC";
++        if (address >= 0x04FFFFFC && address <= 0x04FFFFFF) return "CART_ID";
++        return "MODEM_CANDIDATE";
++    }
++    static const char *Register(uint32 address) {
++        if (address == 0x0010001F) return "SMPC_COMREG";
++        if (address == 0x00100063) return "SMPC_SF";
++        if (address == 0x0582503D) return "ACK_candidate";
++        if (address >= 0x05895000 && address <= 0x0589503F && (address & 3) == 1) {
++            static constexpr const char *names[]{"RBR_THR_DLL?", "IER_DLM?", "IIR_FCR?", "LCR?",
++                                                  "MCR?", "LSR?", "MSR?", "SCR?"};
++            return names[((address - 0x05895001) >> 2) & 7];
++        }
++        return "unknown";
++    }
++    void Run() {
++        for (;;) {
++            std::deque<Event> batch;
++            bool finish;
++            uint64 dropped;
++            {
++                std::unique_lock lock{m_mutex};
++                m_cv.wait_for(lock, std::chrono::milliseconds(100), [&] { return m_stop || !m_queue.empty(); });
++                batch.swap(m_queue);
++                finish = m_stop;
++                dropped = m_dropped;
++            }
++            for (const auto &e : batch) {
++                const uint32 physical = e.address & 0x07FFFFFF;
++                m_file << std::dec << e.us << ',' << (e.master ? "master" : "slave") << ',' << e.cycle
++                       << ",0x" << std::hex << e.pc << ",0x" << e.address << ",0x" << physical << ','
++                       << std::dec << unsigned(e.width) << ',' << (e.write ? 'W' : 'R') << ",0x"
++                       << std::hex << e.value << ',' << (e.codeSnapshot ? "CODE_SNAPSHOT" : Category(physical))
++                       << ',' << (e.codeSnapshot ? "peek_not_bus_access" : Register(physical)) << '\n';
++            }
++            if (finish) m_file << "# end,accepted," << std::dec << m_accepted << ",dropped," << dropped << '\n';
++            m_file.flush();
++            if (finish) break;
++            if (!m_file) {
++                std::lock_guard lock{m_mutex};
++                m_stop = true;
++                break;
++            }
++        }
++    }
++    std::ofstream m_file;
++    std::thread m_worker;
++    std::mutex m_mutex;
++    std::condition_variable m_cv;
++    std::deque<Event> m_queue;
++    bool m_stop = true;
++    uint64 m_accepted = 0, m_dropped = 0;
++    uint64 m_smpcAccepted = 0;
++    std::chrono::steady_clock::time_point m_start{};
++};
++} // namespace app::xband
+diff --git a/apps/ymir-sdl3/src/app/events/emu_event_factory.cpp b/apps/ymir-sdl3/src/app/events/emu_event_factory.cpp
+index 66c1e72..08c9f48 100644
+--- a/apps/ymir-sdl3/src/app/events/emu_event_factory.cpp
++++ b/apps/ymir-sdl3/src/app/events/emu_event_factory.cpp
+@@ -4,6 +4,10 @@
+ 
+ #include <app/shared_context.hpp>
+ 
++#ifdef YMIR_XBAND_FRONTEND
++#include <frontend_modem.hpp>
++#endif
++
+ #include <app/services/graphics_service.hpp>
+ #include <app/services/save_state_service.hpp>
+ 
+@@ -186,6 +190,17 @@ EmuEvent DumpMemory() {
+             std::ofstream out{dumpPath / "wram-hi.bin", std::ios::binary};
+             ctx.saturn.instance->mem.DumpWRAMHigh(out);
+         }
++#ifdef YMIR_XBAND_FRONTEND
++        {
++            // This event runs on the emulator thread, so flash and WRAM are
++            // captured at the same scheduling boundary without bus side effects.
++            std::ofstream out{dumpPath / "xband-flash.bin", std::ios::binary};
++            ctx.serviceLocator.GetRequired<xband::ymir_adapter::FrontendModem>().dumpFlash(out);
++            if (!out) {
++                devlog::warn<grp::base>("Could not write XBAND flash dump to {}", dumpPath);
++            }
++        }
++#endif
+         {
+             std::ofstream out{dumpPath / "vdp1-vram.bin", std::ios::binary};
+             ctx.saturn.instance->VDP.DumpVDP1VRAM(out);
+@@ -785,6 +800,10 @@ EmuEvent LoadState(uint32 slotIndex) {
+         ctx.saturn.instance->SaveState(*undoLoadState);
+ 
+         if (ctx.saturn.instance->LoadState(state, true)) {
++#ifdef YMIR_XBAND_FRONTEND
++            ctx.serviceLocator.GetRequired<xband::ymir_adapter::FrontendModem>().reset(
++                "Save state loaded: reconnect modem with a new server session");
++#endif
+             // Now that the save state has been succesfully loaded, load the ROMs
+             if (iplROMData) {
+                 ctx.saturn.instance->LoadIPL(std::span<uint8, sys::kIPLSize>(*iplROMData));
+@@ -862,6 +881,10 @@ EmuEvent UndoLoadState() {
+         }
+ 
+         if (ctx.saturn.instance->LoadState(*saves.PopUndoLoadState(), true)) {
++#ifdef YMIR_XBAND_FRONTEND
++            ctx.serviceLocator.GetRequired<xband::ymir_adapter::FrontendModem>().reset(
++                "Save state restored: reconnect modem with a new server session");
++#endif
+             ctx.DisplayMessage("Undid load state");
+         } else {
+             devlog::warn<grp::base>("Failed to undo load state");
+diff --git a/apps/ymir-sdl3/src/app/services/input_service.cpp b/apps/ymir-sdl3/src/app/services/input_service.cpp
+index 7a5772d..7fefc76 100644
+--- a/apps/ymir-sdl3/src/app/services/input_service.cpp
++++ b/apps/ymir-sdl3/src/app/services/input_service.cpp
+@@ -19,6 +19,8 @@
+ #include <imgui.h>
+ 
+ #include <algorithm>
++#include <cstdio>
++#include <cstdlib>
+ #include <cmath>
+ #include <limits>
+ 
+@@ -338,6 +340,10 @@ InputService::InputService(SharedContext &context, Settings &settings, InputServ
+     // Saturn Control Pad
+     {
+         using Button = ymir::peripheral::Button;
++        const char *traceSetting = std::getenv("YMIR_XBAND_INPUT_TRACE");
++        const bool traceInput = traceSetting != nullptr && traceSetting[0] == '1' && traceSetting[1] == '\0';
++        const char *sideSetting = std::getenv("YMIR_XBAND_ENDPOINT");
++        const int traceSide = sideSetting != nullptr ? std::atoi(sideSetting) : -1;
+ 
+         auto registerButton = [&](input::Action action, Button button) {
+             inputContext.SetButtonHandler(action, [=](void *context, const input::InputElement &, bool actuated) {
+@@ -347,6 +353,12 @@ InputService::InputService(SharedContext &context, Settings &settings, InputServ
+                 } else {
+                     input.buttons |= button;
+                 }
++                if (traceInput) {
++                    std::fprintf(stderr, "XBAND_PAD side=%d context=%p button=%u pressed=%d state=%u\n",
++                                 traceSide, context, static_cast<unsigned>(button), actuated,
++                                 static_cast<unsigned>(input.buttons));
++                    std::fflush(stderr);
++                }
+             });
+         };
+ 
+@@ -363,6 +375,11 @@ InputService::InputService(SharedContext &context, Settings &settings, InputServ
+                         dpadInput.y = 0.0f;
+                     }
+                     input.UpdateDPad(m_settings.input.gamepad.analogToDigitalSensitivity);
++                    if (traceInput) {
++                        std::fprintf(stderr, "XBAND_PAD side=%d context=%p dpad_x=%.1f dpad_y=%.1f pressed=%d state=%u\n",
++                                     traceSide, context, x, y, actuated, static_cast<unsigned>(input.buttons));
++                        std::fflush(stderr);
++                    }
+                 });
+         };
+ 
+diff --git a/apps/ymir-sdl3/src/app/services/link_cable_service.cpp b/apps/ymir-sdl3/src/app/services/link_cable_service.cpp
+new file mode 100644
+index 0000000..66ccd82
+--- /dev/null
++++ b/apps/ymir-sdl3/src/app/services/link_cable_service.cpp
+@@ -0,0 +1,849 @@
++#include "link_cable_service.hpp"
++
++#ifdef _WIN32
++    #ifndef NOMINMAX
++        #define NOMINMAX
++    #endif
++    #include <winsock2.h>
++    #include <ws2tcpip.h>
++#else
++    #include <arpa/inet.h>
++    #include <cerrno>
++    #include <fcntl.h>
++    #include <netdb.h>
++    #include <netinet/tcp.h>
++    #include <sys/select.h>
++    #include <sys/socket.h>
++    #include <unistd.h>
++#endif
++
++#include <algorithm>
++#include <array>
++#include <chrono>
++#include <string>
++
++namespace app::services {
++
++std::optional<uint64> LinkCableService::CurrentThreadCpuTimeNs() {
++#ifdef _WIN32
++    FILETIME created{}, exited{}, kernel{}, user{};
++    if (!GetThreadTimes(GetCurrentThread(), &created, &exited, &kernel, &user)) return {};
++    const auto ticks = [](FILETIME value) {
++        return (uint64(value.dwHighDateTime) << 32) | value.dwLowDateTime;
++    };
++    return (ticks(kernel) + ticks(user)) * 100;
++#else
++    return {};
++#endif
++}
++
++namespace {
++
++    template <typename T>
++    void RecordMaximum(std::atomic<T> &maximum, T value) {
++        T previous = maximum.load(std::memory_order_relaxed);
++        while (previous < value &&
++               !maximum.compare_exchange_weak(previous, value, std::memory_order_relaxed)) {
++        }
++    }
++
++#ifdef _WIN32
++    using Socket = SOCKET;
++    constexpr Socket kInvalidSocket = INVALID_SOCKET;
++    void CloseSocket(Socket socket) {
++        if (socket != kInvalidSocket) {
++            closesocket(socket);
++        }
++    }
++    bool SetNonBlocking(Socket socket) {
++        u_long enabled = 1;
++        return ioctlsocket(socket, FIONBIO, &enabled) == 0;
++    }
++    bool IsInProgress() {
++        const int error = WSAGetLastError();
++        return error == WSAEWOULDBLOCK || error == WSAEINPROGRESS;
++    }
++#else
++    using Socket = int;
++    constexpr Socket kInvalidSocket = -1;
++    void CloseSocket(Socket socket) {
++        if (socket != kInvalidSocket) {
++            close(socket);
++        }
++    }
++    bool SetNonBlocking(Socket socket) {
++        const int flags = fcntl(socket, F_GETFL, 0);
++        return flags >= 0 && fcntl(socket, F_SETFL, flags | O_NONBLOCK) == 0;
++    }
++    bool IsInProgress() {
++        return errno == EWOULDBLOCK || errno == EINPROGRESS;
++    }
++#endif
++
++    int WaitSocket(Socket socket, bool read, bool write) {
++        fd_set readSet;
++        fd_set writeSet;
++        FD_ZERO(&readSet);
++        FD_ZERO(&writeSet);
++        if (read) {
++            FD_SET(socket, &readSet);
++        }
++        if (write) {
++            FD_SET(socket, &writeSet);
++        }
++        timeval timeout{0, 50'000};
++        return select(static_cast<int>(socket + 1), read ? &readSet : nullptr, write ? &writeSet : nullptr, nullptr,
++                      &timeout);
++    }
++
++} // namespace
++
++LinkCableService::~LinkCableService() {
++    Disconnect();
++}
++
++void LinkCableService::SetDiagnosticsLogPath(const std::filesystem::path &path) {
++    if constexpr (!kDiagnostics) return;
++    // Called during app setup, before the network worker starts. This is a
++    // temporary local diagnostic trace containing cable bytes and frame timestamps.
++    m_diagnosticsLog.open(path, std::ios::app);
++    if (m_diagnosticsLog) {
++        m_diagnosticsLog << "epoch_ms,elapsed_ms,frames,tx,send,recv,dequeue,tx_queued,rx_queued,tx_peak,rx_peak,"
++                            "tx_wait_us,rx_wait_us,rx_batch,scr,ssr,sci_received,dma_rx,dma_tx,cpu_rx_clear,frame_gap_us\n";
++        m_diagnosticsLog.flush();
++        m_traceStarted = std::chrono::steady_clock::now();
++        m_traceEpochUs = std::chrono::duration_cast<std::chrono::microseconds>(
++                             std::chrono::system_clock::now().time_since_epoch())
++                             .count();
++        m_byteTrace.resize(kByteTraceCapacity);
++        m_initializationLog.open(path.parent_path() / "link-cable-init-registers.csv", std::ios::app);
++        if (m_initializationLog) {
++            m_initializationLog << "epoch_us,frame,event,value,cycle,pc,scr,ssr,dropped_total\n";
++            m_initializationLog.flush();
++        }
++        m_lifecycleLog.open(path.parent_path() /
++            (m_masterSCI ? "link-cable-doom-events.csv" : "link-cable-focus-events.csv"), std::ios::app);
++        if (m_lifecycleLog) {
++            m_lifecycleLog << "epoch_us,frame,event,value,source_timestamp_ns,dropped_total\n";
++            m_lifecycleLog.flush();
++        }
++        m_byteTraceLog.open(path.parent_path() /
++            (m_masterSCI ? "link-cable-doom-guest-trace.csv" : "link-cable-focus-guest-trace.csv"), std::ios::app);
++        if (m_byteTraceLog) {
++            m_byteTraceEnabled = true;
++            m_liveTracePath = path.parent_path() / "link-cable-live-trace.csv";
++            m_captureState.store(CaptureState::Ready);
++            m_byteTraceLog << "dump,epoch_us,frame,direction,value,cycle,pc,scr,ssr\n";
++            m_byteTraceLog.flush();
++        }
++    }
++}
++
++void LinkCableService::RecordLifecycleEvent(char event, uint32 value, uint64 sourceTimestampNs) {
++    if constexpr (!kDiagnostics) return;
++    if (!m_byteTraceEnabled) {
++        return;
++    }
++    const auto now = std::chrono::steady_clock::now();
++    const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(now - m_traceStarted).count();
++    std::lock_guard lock{m_diagnosticsMutex};
++    if (m_lifecycleEvents.size() == 256) {
++        m_lifecycleEvents.pop_front();
++        ++m_lifecycleDropped;
++    }
++    m_lifecycleEvents.push_back({m_traceEpochUs + elapsed, m_emulatedFrames.load(std::memory_order_relaxed),
++                                 event, value, sourceTimestampNs});
++}
++
++void LinkCableService::RecordSCIEvent(char event, uint8 value, uint64 cycle, uint32 pc, uint8 scr, uint8 ssr) {
++    if constexpr (!kDiagnostics) return;
++    if (!m_byteTraceEnabled) {
++        return;
++    }
++    const auto now = std::chrono::steady_clock::now();
++    std::lock_guard lock{m_diagnosticsMutex};
++    const size_t index = m_byteTraceNext;
++    RecordByteTraceLocked(event, value, now);
++    auto &entry = m_byteTrace[index];
++    entry.cycle = cycle;
++    entry.pc = pc;
++    entry.scr = scr;
++    entry.ssr = ssr;
++    // Preserve register writes even if no cable bytes are ever sent. Bounded
++    // storage, drained by the worker; no file I/O on the emulation thread.
++    if ((event >= '0' && event <= '4') || event == 'v' || event == 'w') {
++        if (m_initializationEvents.size() < 32768) {
++            m_initializationEvents.push_back(entry);
++        } else {
++            ++m_initializationDropped;
++        }
++    }
++}
++
++void LinkCableService::RecordEmulatedFrame(uint8 scr, uint8 ssr, uint64_t sciReceived, uint64_t dmaReceived,
++                                          uint64_t dmaTransmitted, uint64_t rxFlagCleared) {
++    if constexpr (!kDiagnostics) return;
++    const auto now = std::chrono::steady_clock::now();
++    m_emulatedFrames.fetch_add(1, std::memory_order_relaxed);
++    m_sciControl.store(scr, std::memory_order_relaxed);
++    m_sciStatus.store(ssr, std::memory_order_relaxed);
++    m_sciReceived.store(sciReceived, std::memory_order_relaxed);
++    m_dmaReceived.store(dmaReceived, std::memory_order_relaxed);
++    m_dmaTransmitted.store(dmaTransmitted, std::memory_order_relaxed);
++    m_rxFlagCleared.store(rxFlagCleared, std::memory_order_relaxed);
++    if (!m_byteTraceEnabled) {
++        return;
++    }
++    if (m_previousFrameAt != std::chrono::steady_clock::time_point{}) {
++        const auto gap = std::chrono::duration_cast<std::chrono::microseconds>(now - m_previousFrameAt).count();
++        RecordMaximum(m_windowFrameGapUs, static_cast<uint64_t>(gap));
++    }
++    m_previousFrameAt = now;
++    std::lock_guard lock{m_diagnosticsMutex};
++    RecordByteTraceLocked('F', 0, now);
++}
++
++void LinkCableService::RecordByteTraceLocked(char direction, uint8 value,
++                                             std::chrono::steady_clock::time_point now) {
++    if constexpr (!kDiagnostics) return;
++    if (!m_byteTraceEnabled) {
++        return;
++    }
++    const auto elapsedUs = std::chrono::duration_cast<std::chrono::microseconds>(now - m_traceStarted).count();
++    m_byteTrace[m_byteTraceNext] = {elapsedUs, m_emulatedFrames.load(std::memory_order_relaxed), direction, value};
++    m_byteTraceNext = (m_byteTraceNext + 1) % kByteTraceCapacity;
++    m_byteTraceCount = std::min(m_byteTraceCount + 1, kByteTraceCapacity);
++    ++m_byteTraceTotal;
++    // Frames continue after a cable error. They must neither prevent an idle
++    // dump nor rearm it without new cable traffic.
++    if (direction == 'T' || direction == 'R' || direction == 't' || direction == 'r') {
++        ++m_cableByteTraceTotal;
++        m_lastByteTraceAt = now;
++    }
++}
++
++void LinkCableService::DumpByteTraceIfIdle(std::chrono::steady_clock::time_point now) {
++    if (!m_byteTraceLog) {
++        return;
++    }
++    std::vector<ByteTraceEvent> events;
++    uint64_t dump = 0;
++    {
++        std::lock_guard lock{m_diagnosticsMutex};
++        if (m_cableByteTraceTotal - m_lastDumpCableByteTotal < 512 ||
++            now - m_lastByteTraceAt < std::chrono::milliseconds(400) ||
++            now - m_lastTcpReceiveAt < std::chrono::milliseconds(400)) {
++            return;
++        }
++        const size_t first = (m_byteTraceNext + kByteTraceCapacity - m_byteTraceCount) % kByteTraceCapacity;
++        events.reserve(m_byteTraceCount);
++        for (size_t i = 0; i < m_byteTraceCount; ++i) {
++            events.push_back(m_byteTrace[(first + i) % kByteTraceCapacity]);
++        }
++        m_lastDumpCableByteTotal = m_cableByteTraceTotal;
++        dump = m_byteTraceTotal;
++    }
++    for (const auto &event : events) {
++        m_byteTraceLog << dump << ',' << m_traceEpochUs + event.elapsedUs << ',' << event.frame << ','
++                       << event.direction << ',' << static_cast<unsigned>(event.value) << ','
++                       << event.cycle << ',' << event.pc << ',' << static_cast<unsigned>(event.scr) << ','
++                       << static_cast<unsigned>(event.ssr) << '\n';
++    }
++    m_byteTraceLog.flush();
++}
++
++void LinkCableService::RequestLiveCapture() {
++    if constexpr (!kDiagnostics) return;
++    if (GetState() != State::Connected) return;
++    auto state = m_captureState.load();
++    while (state == CaptureState::Ready || state == CaptureState::Saved ||
++           state == CaptureState::Incomplete || state == CaptureState::Failed) {
++        if (m_captureState.compare_exchange_weak(state, CaptureState::Requested)) return;
++    }
++}
++
++void LinkCableService::UpdateLiveCapture(std::chrono::steady_clock::time_point now, bool finish) {
++    if constexpr (!kDiagnostics) return;
++    if (m_captureState.load() == CaptureState::Requested) {
++        if (finish) {
++            m_captureState.store(CaptureState::Incomplete);
++            return;
++        }
++        m_liveEvents.clear();
++        m_livePerformanceStart = GetPerformance();
++        m_livePerformanceAt = now;
++        m_liveDropped = 0;
++        m_liveDeadline = now + std::chrono::seconds(10);
++        m_liveSampleAt = now;
++        m_liveCaptureId = m_traceEpochUs +
++            std::chrono::duration_cast<std::chrono::microseconds>(now - m_traceStarted).count();
++        {
++            std::lock_guard lock{m_diagnosticsMutex};
++            m_liveCursor = m_byteTraceTotal;
++        }
++        m_captureState.store(CaptureState::Recording);
++    }
++    if (m_captureState.load() != CaptureState::Recording) return;
++    if (!finish && now - m_liveSampleAt < std::chrono::milliseconds(100)) return;
++    m_liveSampleAt = now;
++    // Bounded memory; file output happens only after the capture window.
++    constexpr size_t capacity = 1024 * 1024;
++    std::vector<LiveTraceEvent> batch;
++    batch.reserve(kByteTraceCapacity);
++    const auto endUs = std::chrono::duration_cast<std::chrono::microseconds>(m_liveDeadline - m_traceStarted).count();
++    {
++        std::lock_guard lock{m_diagnosticsMutex};
++        const uint64_t oldest = m_byteTraceTotal - m_byteTraceCount;
++        if (m_liveCursor < oldest) {
++            m_liveDropped += oldest - m_liveCursor;
++            m_liveCursor = oldest;
++        }
++        for (; m_liveCursor < m_byteTraceTotal; ++m_liveCursor) {
++            const auto &event = m_byteTrace[m_liveCursor % kByteTraceCapacity];
++            if (event.elapsedUs <= endUs) batch.push_back({m_liveCursor, event});
++        }
++    }
++    for (const auto &entry : batch) {
++        if (m_liveEvents.size() < capacity) m_liveEvents.push_back(entry);
++        else ++m_liveDropped;
++    }
++    if (!finish && now < m_liveDeadline) return;
++    m_captureState.store(CaptureState::Saving);
++    // Snapshot before formatting/writing the trace, excluding save-time I/O.
++    const auto performance = GetPerformance();
++    const auto performanceWindowNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
++        now - m_livePerformanceAt).count();
++    std::ofstream log(m_liveTracePath, std::ios::app);
++    log << "capture,sequence,epoch_us,frame,event,value,cycle,pc,scr,ssr,dropped_total,incomplete\n";
++    const bool incomplete = finish || m_liveDropped != 0;
++    for (const auto &entry : m_liveEvents) {
++        const auto &event = entry.event;
++        log << m_liveCaptureId << ',' << entry.sequence << ',' << m_traceEpochUs + event.elapsedUs << ','
++            << event.frame << ',' << event.direction << ',' << static_cast<unsigned>(event.value) << ','
++            << event.cycle << ',' << event.pc << ',' << static_cast<unsigned>(event.scr) << ','
++            << static_cast<unsigned>(event.ssr) << ',' << m_liveDropped << ',' << incomplete << '\n';
++    }
++    // Footer also records empty captures and truncation explicitly.
++    log << "# end," << m_liveCaptureId << ",events," << m_liveEvents.size()
++        << ",dropped," << m_liveDropped << ",incomplete," << incomplete << '\n';
++    if (m_synchronized) {
++        log << "# sync_perf_v1," << m_liveCaptureId << ",window_ns," << performanceWindowNs
++            << ",run_ns," << performance.runNs - m_livePerformanceStart.runNs
++            << ",pacing_ns," << performance.pacingNs - m_livePerformanceStart.pacingNs
++            << ",sync_wait_ns," << performance.syncWaitNs - m_livePerformanceStart.syncWaitNs
++            << ",run_calls," << performance.runCalls - m_livePerformanceStart.runCalls
++            << ",barriers," << performance.barriers - m_livePerformanceStart.barriers << '\n';
++        log << "# sync_detail_v1," << m_liveCaptureId
++            << ",audio_wait_ns," << performance.audioWaitNs - m_livePerformanceStart.audioWaitNs
++            << ",software_present_ns," << performance.softwarePresentNs - m_livePerformanceStart.softwarePresentNs
++            << ",thread_cpu_ns," << performance.threadCpuNs - m_livePerformanceStart.threadCpuNs
++            << ",cpu_samples," << performance.cpuSamples - m_livePerformanceStart.cpuSamples << '\n';
++    }
++    log.flush();
++    const bool saved = static_cast<bool>(log);
++    m_liveEvents.clear();
++    m_captureState.store(!saved ? CaptureState::Failed : incomplete ? CaptureState::Incomplete : CaptureState::Saved);
++}
++
++void LinkCableService::RecordTraceSample(std::chrono::steady_clock::time_point now) {
++    UpdateLiveCapture(now);
++    if (!m_diagnosticsLog || now - m_previousTraceSample < std::chrono::milliseconds(100)) {
++        return;
++    }
++    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - m_traceStarted).count();
++    // Sparse UI/pause events have their own queue so ongoing byte traffic cannot
++    // evict them. Only the network worker writes files, outside the shared lock.
++    std::deque<LifecycleEvent> lifecycle;
++    std::vector<ByteTraceEvent> initialization;
++    uint64 initializationDropped;
++    uint64 dropped;
++    {
++        std::lock_guard lock{m_diagnosticsMutex};
++        lifecycle.swap(m_lifecycleEvents);
++        initialization.swap(m_initializationEvents);
++        initializationDropped = m_initializationDropped;
++        dropped = m_lifecycleDropped;
++    }
++    if (m_initializationLog && !initialization.empty()) {
++        for (const auto &event : initialization) {
++            m_initializationLog << m_traceEpochUs + event.elapsedUs << ',' << event.frame << ','
++                                << event.direction << ',' << static_cast<unsigned>(event.value) << ','
++                                << event.cycle << ',' << event.pc << ',' << static_cast<unsigned>(event.scr) << ','
++                                << static_cast<unsigned>(event.ssr) << ',' << initializationDropped << '\n';
++        }
++        m_initializationLog.flush();
++    }
++    if (m_lifecycleLog && !lifecycle.empty()) {
++        for (const auto &event : lifecycle) {
++            m_lifecycleLog << event.epochUs << ',' << event.frame << ',' << event.event << ',' << event.value
++                           << ',' << event.sourceTimestampNs << ',' << dropped << '\n';
++        }
++        m_lifecycleLog.flush();
++    }
++    const auto epoch = std::chrono::duration_cast<std::chrono::milliseconds>(
++                           std::chrono::system_clock::now().time_since_epoch())
++                           .count();
++    const uint64_t frames = m_emulatedFrames.load(std::memory_order_relaxed);
++    const uint64_t transmitted = m_transmitted.load(std::memory_order_relaxed);
++    const uint64_t sent = m_sent.load(std::memory_order_relaxed);
++    const uint64_t received = m_received.load(std::memory_order_relaxed);
++    const uint64_t delivered = m_delivered.load(std::memory_order_relaxed);
++    size_t txQueued = 0;
++    {
++        std::lock_guard lock{m_txMutex};
++        txQueued = m_tx.size();
++    }
++    m_diagnosticsLog << epoch << ',' << elapsed << ',' << frames - m_previousFrames << ','
++                     << transmitted - m_previousTransmitted << ',' << sent - m_previousSent << ','
++                     << received - m_previousReceived << ',' << delivered - m_previousDelivered << ','
++                     << txQueued << ',' << m_rxCount.load(std::memory_order_relaxed) << ','
++                     << m_windowPeakTxCount.exchange(0, std::memory_order_relaxed) << ','
++                     << m_windowPeakRxCount.exchange(0, std::memory_order_relaxed) << ','
++                     << m_windowSendWaitUs.exchange(0, std::memory_order_relaxed) << ','
++                     << m_windowReceiveWaitUs.exchange(0, std::memory_order_relaxed) << ','
++                     << m_windowReceiveBatch.exchange(0, std::memory_order_relaxed) << ','
++                     << static_cast<unsigned>(m_sciControl.load(std::memory_order_relaxed)) << ','
++                     << static_cast<unsigned>(m_sciStatus.load(std::memory_order_relaxed)) << ','
++                     << m_sciReceived.load(std::memory_order_relaxed) << ','
++                     << m_dmaReceived.load(std::memory_order_relaxed) << ','
++                     << m_dmaTransmitted.load(std::memory_order_relaxed) << ','
++                     << m_rxFlagCleared.load(std::memory_order_relaxed) << ','
++                     << m_windowFrameGapUs.exchange(0, std::memory_order_relaxed) << '\n';
++    m_diagnosticsLog.flush();
++    DumpByteTraceIfIdle(now);
++    m_previousTraceSample = now;
++    m_previousFrames = frames;
++    m_previousTransmitted = transmitted;
++    m_previousSent = sent;
++    m_previousReceived = received;
++    m_previousDelivered = delivered;
++}
++
++std::string LinkCableService::GetError() const {
++    std::lock_guard lock{m_errorMutex};
++    return m_error;
++}
++
++std::vector<std::string> LinkCableService::TakeNotifications() {
++    std::lock_guard lock{m_notificationMutex};
++    std::vector<std::string> notifications;
++    notifications.swap(m_notifications);
++    return notifications;
++}
++
++LinkCableService::Diagnostics LinkCableService::GetDiagnostics() const {
++    Diagnostics diagnostics{
++        m_transmitted.load(std::memory_order_relaxed), m_sent.load(std::memory_order_relaxed),
++        m_received.load(std::memory_order_relaxed), m_delivered.load(std::memory_order_relaxed),
++        m_rxCount.load(std::memory_order_relaxed),
++    };
++    diagnostics.peakReceiveQueue = m_peakRxCount.load(std::memory_order_relaxed);
++    diagnostics.peakSendQueue = m_peakTxCount.load(std::memory_order_relaxed);
++    diagnostics.longestSendWaitUs = m_longestSendWaitUs.load(std::memory_order_relaxed);
++    diagnostics.longestReceiveWaitUs = m_longestReceiveWaitUs.load(std::memory_order_relaxed);
++    diagnostics.largestReceiveBatch = m_largestReceiveBatch.load(std::memory_order_relaxed);
++    {
++        std::lock_guard lock{m_diagnosticsMutex};
++        diagnostics.transmittedBytes = m_transmittedBytes;
++        diagnostics.receivedBytes = m_receivedBytes;
++    }
++    return diagnostics;
++}
++
++void LinkCableService::Listen(uint16_t port) {
++    Start(Mode::Listen, {}, port);
++}
++
++void LinkCableService::Connect(std::string host, uint16_t port) {
++    Start(Mode::Connect, std::move(host), port);
++}
++
++void LinkCableService::AutoConnectLocal(uint16_t port) {
++    Start(Mode::AutoLocal, "127.0.0.1", port);
++}
++
++void LinkCableService::Start(Mode mode, std::string host, uint16_t port) {
++    Disconnect();
++    {
++        std::lock_guard lock{m_errorMutex};
++        m_error.clear();
++    }
++    m_stop.store(false, std::memory_order_release);
++    m_state.store(mode == Mode::Listen ? State::Listening : State::Connecting, std::memory_order_release);
++    m_thread = std::thread{[this, mode, host = std::move(host), port] { Run(mode, host, port); }};
++}
++
++void LinkCableService::Disconnect() {
++    m_stop.store(true, std::memory_order_release);
++    m_txCV.notify_all();
++    m_syncCV.notify_all();
++    if (m_thread.joinable()) {
++        m_thread.join();
++    }
++    {
++        std::lock_guard lock{m_txMutex};
++        m_tx.clear();
++    }
++    {
++        std::lock_guard lock{m_rxMutex};
++        m_rx.clear();
++        m_rxCount.store(0, std::memory_order_release);
++    }
++    m_state.store(State::Disconnected, std::memory_order_release);
++}
++
++void LinkCableService::Fail(std::string message) {
++    {
++        std::lock_guard lock{m_errorMutex};
++        m_error = message;
++    }
++    const State previous = m_state.exchange(State::Error, std::memory_order_acq_rel);
++    if (previous == State::Connected && !m_stop.load(std::memory_order_acquire)) {
++        std::lock_guard lock{m_notificationMutex};
++        m_notifications.push_back("Battle (Taisen) Cable disconnected: " + message);
++    }
++}
++
++void LinkCableService::Transmit(uint8 value) {
++    if (GetState() != State::Connected) {
++        return;
++    }
++    m_transmitted.fetch_add(1, std::memory_order_relaxed);
++    {
++        std::lock_guard lock{m_diagnosticsMutex};
++        ++m_transmittedBytes[value];
++        RecordByteTraceLocked('T', value, std::chrono::steady_clock::now());
++    }
++    bool overflow = false;
++    {
++        std::lock_guard lock{m_txMutex};
++        if (m_tx.size() < kMaxQueuedBytes) {
++            m_tx.push_back({value, std::chrono::steady_clock::now()});
++            RecordMaximum(m_peakTxCount, m_tx.size());
++            RecordMaximum(m_windowPeakTxCount, m_tx.size());
++        } else {
++            overflow = true;
++        }
++    }
++    if (overflow) {
++        Fail("Link-cable send queue overflow");
++        m_stop.store(true, std::memory_order_release);
++    } else {
++        m_txCV.notify_one();
++    }
++}
++
++std::optional<uint8> LinkCableService::Receive() {
++    if (m_rxCount.load(std::memory_order_acquire) == 0) {
++        return std::nullopt;
++    }
++    std::lock_guard lock{m_rxMutex};
++    if (m_rx.empty()) {
++        return std::nullopt;
++    }
++    const QueuedByte queued = m_rx.front();
++    m_rx.pop_front();
++    m_rxCount.store(m_rx.size(), std::memory_order_release);
++    m_delivered.fetch_add(1, std::memory_order_relaxed);
++    const auto receivedAt = std::chrono::steady_clock::now();
++    const auto wait = std::chrono::duration_cast<std::chrono::microseconds>(receivedAt - queued.queuedAt);
++    RecordMaximum(m_longestReceiveWaitUs, static_cast<uint64_t>(wait.count()));
++    RecordMaximum(m_windowReceiveWaitUs, static_cast<uint64_t>(wait.count()));
++    {
++        std::lock_guard diagnosticsLock{m_diagnosticsMutex};
++        RecordByteTraceLocked('R', queued.value, receivedAt);
++    }
++    return queued.value;
++}
++
++void LinkCableService::Run(Mode mode, std::string host, uint16_t port) {
++    if (mode != Mode::AutoLocal) {
++        RunSession(mode, std::move(host), port);
++        return;
++    }
++
++    // The checkbox owns the lifetime of the virtual cable. A peer disconnect
++    // drops the current TCP session but leaves the local cable enabled, so an
++    // auto-paired instance keeps waiting for its partner to return.
++    while (!m_stop.load(std::memory_order_acquire)) {
++        {
++            std::lock_guard lock{m_txMutex};
++            m_tx.clear();
++        }
++        {
++            std::lock_guard lock{m_rxMutex};
++            m_rx.clear();
++            m_rxCount.store(0, std::memory_order_release);
++        }
++        m_state.store(State::Connecting, std::memory_order_release);
++        RunSession(mode, host, port);
++        if (!m_stop.load(std::memory_order_acquire)) {
++            std::this_thread::sleep_for(std::chrono::milliseconds(200));
++        }
++    }
++}
++
++void LinkCableService::RunSession(Mode mode, std::string host, uint16_t port) {
++#ifdef _WIN32
++    WSADATA wsa{};
++    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
++        Fail("Could not initialize Winsock");
++        return;
++    }
++#endif
++
++    Socket listener = kInvalidSocket;
++    Socket peer = kInvalidSocket;
++    auto cleanup = [&] {
++        CloseSocket(peer);
++        CloseSocket(listener);
++#ifdef _WIN32
++        WSACleanup();
++#endif
++    };
++
++    if (mode != Mode::Connect) {
++        listener = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
++        if (listener == kInvalidSocket || !SetNonBlocking(listener)) {
++            Fail("Could not create link-cable listener");
++            cleanup();
++            return;
++        }
++        sockaddr_in address{};
++        address.sin_family = AF_INET;
++        address.sin_addr.s_addr = htonl(mode == Mode::AutoLocal ? INADDR_LOOPBACK : INADDR_ANY);
++        address.sin_port = htons(port);
++        if (bind(listener, reinterpret_cast<sockaddr *>(&address), sizeof(address)) != 0 || listen(listener, 1) != 0) {
++            if (mode == Mode::AutoLocal) {
++                CloseSocket(listener);
++                listener = kInvalidSocket;
++                mode = Mode::Connect;
++            } else {
++                Fail("Could not bind link-cable port (already in use or blocked)");
++                cleanup();
++                return;
++            }
++        }
++        if (listener != kInvalidSocket) {
++            m_state.store(State::Listening, std::memory_order_release);
++            while (!m_stop.load(std::memory_order_acquire)) {
++                const int ready = WaitSocket(listener, true, false);
++                if (ready < 0) {
++                    Fail("Link-cable listener failed");
++                    cleanup();
++                    return;
++                }
++                if (ready > 0) {
++                    peer = accept(listener, nullptr, nullptr);
++                    if (peer != kInvalidSocket) {
++                        break;
++                    }
++                }
++            }
++            CloseSocket(listener);
++            listener = kInvalidSocket;
++        }
++    }
++    if (mode == Mode::Connect) {
++        addrinfo hints{};
++        hints.ai_family = AF_INET;
++        hints.ai_socktype = SOCK_STREAM;
++        hints.ai_protocol = IPPROTO_TCP;
++        addrinfo *addresses = nullptr;
++        const std::string service = std::to_string(port);
++        if (getaddrinfo(host.c_str(), service.c_str(), &hints, &addresses) != 0 || addresses == nullptr) {
++            Fail("Could not resolve link-cable host");
++            cleanup();
++            return;
++        }
++        peer = socket(addresses->ai_family, addresses->ai_socktype, addresses->ai_protocol);
++        if (peer == kInvalidSocket || !SetNonBlocking(peer)) {
++            freeaddrinfo(addresses);
++            Fail("Could not create link-cable socket");
++            cleanup();
++            return;
++        }
++        const int result = connect(peer, addresses->ai_addr, static_cast<int>(addresses->ai_addrlen));
++        const bool pending = result != 0 && IsInProgress();
++        freeaddrinfo(addresses);
++        if (result != 0 && !pending) {
++            Fail("Could not connect to link-cable host");
++            cleanup();
++            return;
++        }
++        while (pending && !m_stop.load(std::memory_order_acquire)) {
++            const int ready = WaitSocket(peer, false, true);
++            if (ready < 0) {
++                Fail("Link-cable connection failed");
++                cleanup();
++                return;
++            }
++            if (ready > 0) {
++                int error = 0;
++#ifdef _WIN32
++                int length = sizeof(error);
++#else
++                socklen_t length = sizeof(error);
++#endif
++                if (getsockopt(peer, SOL_SOCKET, SO_ERROR, reinterpret_cast<char *>(&error), &length) != 0 ||
++                    error != 0) {
++                    Fail("Link-cable connection refused or unreachable");
++                    cleanup();
++                    return;
++                }
++                break;
++            }
++        }
++    }
++
++    if (m_stop.load(std::memory_order_acquire)) {
++        cleanup();
++        return;
++    }
++    if (peer == kInvalidSocket) {
++        Fail("Link-cable connection failed");
++        cleanup();
++        return;
++    }
++    int noDelay = 1;
++    setsockopt(peer, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char *>(&noDelay), sizeof(noDelay));
++#ifdef SO_NOSIGPIPE
++    setsockopt(peer, SOL_SOCKET, SO_NOSIGPIPE, &noDelay, sizeof(noDelay));
++#endif
++    SetNonBlocking(peer);
++    if (m_synchronized || m_dualSCI) {
++        RunSynchronizedSession(static_cast<uintptr_t>(peer));
++        cleanup();
++        return;
++    }
++    m_peakRxCount.store(0, std::memory_order_release);
++    m_peakTxCount.store(0, std::memory_order_release);
++    m_longestSendWaitUs.store(0, std::memory_order_release);
++    m_longestReceiveWaitUs.store(0, std::memory_order_release);
++    m_largestReceiveBatch.store(0, std::memory_order_release);
++    m_windowPeakRxCount.store(0, std::memory_order_release);
++    m_windowPeakTxCount.store(0, std::memory_order_release);
++    m_windowSendWaitUs.store(0, std::memory_order_release);
++    m_windowReceiveWaitUs.store(0, std::memory_order_release);
++    m_windowReceiveBatch.store(0, std::memory_order_release);
++    m_previousTraceSample = std::chrono::steady_clock::now();
++    m_lastTcpReceiveAt = m_previousTraceSample;
++    m_previousFrames = m_emulatedFrames.load(std::memory_order_relaxed);
++    m_previousTransmitted = m_transmitted.load(std::memory_order_relaxed);
++    m_previousSent = m_sent.load(std::memory_order_relaxed);
++    m_previousReceived = m_received.load(std::memory_order_relaxed);
++    m_previousDelivered = m_delivered.load(std::memory_order_relaxed);
++    m_state.store(State::Connected, std::memory_order_release);
++
++    // A serial byte must not wait for the receive thread's select timeout
++    // before it reaches the peer. Wake a dedicated sender as soon as the
++    // emulation thread queues it; keep socket I/O off the emulation thread.
++    std::atomic<bool> stopSession{false};
++    std::thread sender{[&] {
++        std::array<uint8, 256> output{};
++        while (!m_stop.load(std::memory_order_acquire) && !stopSession.load(std::memory_order_acquire)) {
++            size_t count = 0;
++            {
++                std::unique_lock lock{m_txMutex};
++                m_txCV.wait(lock, [&] {
++                    return m_stop.load(std::memory_order_acquire) || stopSession.load(std::memory_order_acquire) ||
++                           !m_tx.empty();
++                });
++                if (m_stop.load(std::memory_order_acquire) || stopSession.load(std::memory_order_acquire)) {
++                    break;
++                }
++                count = std::min(m_tx.size(), output.size());
++                for (size_t i = 0; i < count; ++i) {
++                    output[i] = m_tx[i].value;
++                }
++            }
++            int flags = 0;
++#ifdef MSG_NOSIGNAL
++            flags = MSG_NOSIGNAL;
++#endif
++            const int sent = send(peer, reinterpret_cast<const char *>(output.data()), static_cast<int>(count), flags);
++            if (sent < 0 && IsInProgress()) {
++                if (WaitSocket(peer, false, true) < 0) {
++                    Fail("Link-cable send failed");
++                    stopSession.store(true, std::memory_order_release);
++                }
++                continue;
++            }
++            if (sent <= 0) {
++                Fail("Link-cable send failed");
++                stopSession.store(true, std::memory_order_release);
++                break;
++            }
++            m_sent.fetch_add(static_cast<uint64_t>(sent), std::memory_order_relaxed);
++            const auto sentAt = std::chrono::steady_clock::now();
++            {
++                std::lock_guard lock{m_txMutex};
++                for (int i = 0; i < sent; ++i) {
++                    const auto wait = std::chrono::duration_cast<std::chrono::microseconds>(sentAt - m_tx.front().queuedAt);
++                    RecordMaximum(m_longestSendWaitUs, static_cast<uint64_t>(wait.count()));
++                    RecordMaximum(m_windowSendWaitUs, static_cast<uint64_t>(wait.count()));
++                    m_tx.pop_front();
++                }
++            }
++        }
++    }};
++
++    std::array<uint8, 256> buffer{};
++    while (!m_stop.load(std::memory_order_acquire) && !stopSession.load(std::memory_order_acquire)) {
++        fd_set readSet;
++        FD_ZERO(&readSet);
++        FD_SET(peer, &readSet);
++        timeval timeout{0, 20'000};
++        const int ready = select(static_cast<int>(peer + 1), &readSet, nullptr, nullptr, &timeout);
++        RecordTraceSample(std::chrono::steady_clock::now());
++        if (ready < 0) {
++            Fail("Link-cable socket error");
++            break;
++        }
++        if (ready == 0) {
++            continue;
++        }
++        if (FD_ISSET(peer, &readSet)) {
++            const int count = recv(peer, reinterpret_cast<char *>(buffer.data()), static_cast<int>(buffer.size()), 0);
++            if (count < 0 && IsInProgress()) {
++                continue;
++            }
++            if (count <= 0) {
++                Fail("Link-cable peer disconnected");
++                break;
++            }
++            std::lock_guard lock{m_rxMutex};
++            if (m_rx.size() + static_cast<size_t>(count) > kMaxQueuedBytes) {
++                Fail("Link-cable receive queue overflow");
++                break;
++            }
++            const auto receivedAt = std::chrono::steady_clock::now();
++            m_lastTcpReceiveAt = receivedAt;
++            for (int i = 0; i < count; ++i) {
++                m_rx.push_back({buffer[i], receivedAt});
++            }
++            const size_t queueSize = m_rx.size();
++            m_rxCount.store(queueSize, std::memory_order_release);
++            RecordMaximum(m_peakRxCount, queueSize);
++            RecordMaximum(m_windowPeakRxCount, queueSize);
++            RecordMaximum(m_largestReceiveBatch, static_cast<uint64_t>(count));
++            RecordMaximum(m_windowReceiveBatch, static_cast<uint64_t>(count));
++            m_received.fetch_add(static_cast<uint64_t>(count), std::memory_order_relaxed);
++            {
++                std::lock_guard diagnosticsLock{m_diagnosticsMutex};
++                for (int i = 0; i < count; ++i) {
++                    ++m_receivedBytes[buffer[i]];
++                }
++            }
++        }
++    }
++    stopSession.store(true, std::memory_order_release);
++    m_txCV.notify_all();
++    sender.join();
++    UpdateLiveCapture(std::chrono::steady_clock::now(), true);
++    cleanup();
++}
++
++#include "link_cable_sync.inc"
++
++} // namespace app::services
+diff --git a/apps/ymir-sdl3/src/app/services/link_cable_service.hpp b/apps/ymir-sdl3/src/app/services/link_cable_service.hpp
+new file mode 100644
+index 0000000..c0c7372
+--- /dev/null
++++ b/apps/ymir-sdl3/src/app/services/link_cable_service.hpp
+@@ -0,0 +1,262 @@
++#pragma once
++
++#include <ymir/core/types.hpp>
++
++#include <array>
++#include <atomic>
++#include <chrono>
++#include <condition_variable>
++#include <cstdint>
++#include <deque>
++#include <filesystem>
++#include <fstream>
++#include <functional>
++#include <mutex>
++#include <optional>
++#include <string>
++#include <thread>
++#include <vector>
++
++namespace app::services {
++
++#ifndef YMIR_LINK_DIAGNOSTICS
++#define YMIR_LINK_DIAGNOSTICS 0
++#endif
++
++/// @brief Connects a Saturn SH-2 SCI to another Ymir instance over TCP.
++///
++/// Socket I/O runs on worker threads. The emulation thread only touches the
++/// bounded byte queues, so a stalled peer cannot block emulation.
++class LinkCableService {
++public:
++    // Opt-in for standalone regression/diagnostic builds only, never a user setting.
++    static constexpr bool kDiagnostics = YMIR_LINK_DIAGNOSTICS != 0;
++    enum class State { Disconnected, Listening, Connecting, Connected, Error };
++
++    struct Diagnostics {
++        uint64_t transmitted = 0;
++        uint64_t sent = 0;
++        uint64_t received = 0;
++        uint64_t delivered = 0;
++        size_t receiveQueue = 0;
++        size_t peakReceiveQueue = 0;
++        size_t peakSendQueue = 0;
++        uint64_t longestSendWaitUs = 0;
++        uint64_t longestReceiveWaitUs = 0;
++        uint64_t largestReceiveBatch = 0;
++        std::array<uint64_t, 256> transmittedBytes{};
++        std::array<uint64_t, 256> receivedBytes{};
++    };
++
++    LinkCableService() = default;
++    ~LinkCableService();
++
++    LinkCableService(const LinkCableService &) = delete;
++    LinkCableService &operator=(const LinkCableService &) = delete;
++
++    void Listen(uint16_t port);
++    void Connect(std::string host, uint16_t port);
++    void AutoConnectLocal(uint16_t port);
++    void Disconnect();
++    void SetDiagnosticsLogPath(const std::filesystem::path &path);
++    enum class CaptureState { Unavailable, Ready, Requested, Recording, Saving, Saved, Incomplete, Failed };
++    void RequestLiveCapture();
++    CaptureState GetCaptureState() const { return m_captureState.load(); }
++    // Diagnostic routing choice, set once during setup before threads start.
++    void SetMasterSCI(bool master) { m_masterSCI = master; }
++    bool UsesMasterSCI() const { return m_masterSCI; }
++    // Independent master/slave lanes. Set before starting network workers.
++    void SetDualSCI(bool enabled) { m_dualSCI = enabled; }
++    bool UsesDualSCI() const { return m_dualSCI; }
++    bool LastActiveMasterSCI() const { return m_lastActiveMaster.load(); }
++    void TransmitSCI(bool master, uint8 value, uint64 cycle);
++    std::optional<uint8> ReceiveSCI(bool master, uint64 cycle);
++    // Experimental wire protocol; select before starting workers.
++    void SetSynchronized(bool enabled) { m_synchronized = enabled; }
++    bool UsesSynchronization() const { return m_synchronized; }
++    bool IsSyncWaiting() const { return m_syncWaiting.load(); }
++    // Cumulative wall times, not CPU utilization. Run includes synchronization
++    // and renderer/audio waits; pacing is outside RunFrame.
++    struct Performance {
++        uint64 runNs = 0, pacingNs = 0, syncWaitNs = 0, runCalls = 0, barriers = 0;
++        uint64 audioWaitNs = 0, softwarePresentNs = 0, threadCpuNs = 0, cpuSamples = 0;
++    };
++    Performance GetPerformance() const {
++        return {m_runNs.load(), m_pacingNs.load(), m_syncWaitNs.load(), m_runCalls.load(), m_barriers.load(),
++                m_audioWaitNs.load(), m_softwarePresentNs.load(), m_threadCpuNs.load(), m_cpuSamples.load()};
++    }
++    void RecordRunTime(uint64 ns) { m_runNs.fetch_add(ns); m_runCalls.fetch_add(1); }
++    void RecordPacingTime(uint64 ns) { m_pacingNs.fetch_add(ns); }
++    void RecordAudioWaitTime(uint64 ns) { m_audioWaitNs.fetch_add(ns); }
++    void RecordSoftwarePresentTime(uint64 ns) { m_softwarePresentNs.fetch_add(ns); }
++    void RecordThreadCpuTime(uint64 ns) { m_threadCpuNs.fetch_add(ns); m_cpuSamples.fetch_add(1); }
++    // Empty on unsupported platforms or OS query failure. Counts current thread only.
++    static std::optional<uint64> CurrentThreadCpuTimeNs();
++    void AbortSynchronization(const char *reason) {
++        if (!m_synchronized || GetState() != State::Connected) return;
++        m_stop.store(true);
++        SyncError(reason);
++    }
++    static constexpr uint64 kSyncQuantum = 4096;
++    uint64 AdvanceSynchronized(uint64 cycle, uint64 revision, uint32 clockTag,
++                               const std::function<bool()> &cancelled);
++    void TransmitTimed(uint8 value, uint64 cycle);
++    std::optional<uint8> ReceiveTimed(uint64 cycle);
++    void RecordLifecycleEvent(char event, uint32 value, uint64 sourceTimestampNs = 0);
++    void RecordSCIEvent(char event, uint8 value, uint64 cycle, uint32 pc, uint8 scr, uint8 ssr);
++    void RecordEmulatedFrame(uint8 scr, uint8 ssr, uint64_t sciReceived, uint64_t dmaReceived,
++                             uint64_t dmaTransmitted, uint64_t rxFlagCleared);
++
++    State GetState() const {
++        return m_state.load(std::memory_order_acquire);
++    }
++    std::string GetError() const;
++    std::vector<std::string> TakeNotifications();
++    Diagnostics GetDiagnostics() const;
++
++    void Transmit(uint8 value);
++    std::optional<uint8> Receive();
++
++private:
++    enum class Mode { Listen, Connect, AutoLocal };
++
++    static constexpr size_t kMaxQueuedBytes = 64 * 1024;
++    struct QueuedByte {
++        uint8 value;
++        std::chrono::steady_clock::time_point queuedAt;
++    };
++    struct ByteTraceEvent {
++        int64_t elapsedUs;
++        uint64_t frame;
++        char direction;
++        uint8 value;
++        uint64 cycle = 0;
++        uint32 pc = 0;
++        uint8 scr = 0;
++        uint8 ssr = 0;
++    };
++    static constexpr size_t kByteTraceCapacity = 32 * 1024;
++
++    void Start(Mode mode, std::string host, uint16_t port);
++    void Run(Mode mode, std::string host, uint16_t port);
++    void RunSession(Mode mode, std::string host, uint16_t port);
++    void RunSynchronizedSession(uintptr_t socket);
++    void SyncError(const char *message);
++    using SyncMessage = std::array<uint8, 24>;
++    void QueueSyncMessage(uint64 type, uint64 cycle, uint64 value); // m_syncMutex held
++    bool ParseSyncMessage(const SyncMessage &message);
++    void Fail(std::string message);
++    void RecordTraceSample(std::chrono::steady_clock::time_point now);
++    void RecordByteTraceLocked(char direction, uint8 value, std::chrono::steady_clock::time_point now);
++    void DumpByteTraceIfIdle(std::chrono::steady_clock::time_point now);
++    void UpdateLiveCapture(std::chrono::steady_clock::time_point now, bool finish = false);
++
++    std::atomic<State> m_state{State::Disconnected};
++    bool m_synchronized = false;
++    bool m_dualSCI = false;
++    std::atomic<bool> m_lastActiveMaster{false};
++    std::atomic<uint64> m_runNs{0}, m_pacingNs{0}, m_syncWaitNs{0}, m_runCalls{0}, m_barriers{0};
++    std::atomic<uint64> m_audioWaitNs{0}, m_softwarePresentNs{0}, m_threadCpuNs{0}, m_cpuSamples{0};
++    Performance m_livePerformanceStart{};
++    std::chrono::steady_clock::time_point m_livePerformanceAt{};
++    std::atomic<bool> m_syncFault{false}, m_syncWaiting{false};
++    std::mutex m_syncMutex;
++    std::condition_variable m_syncCV;
++    std::deque<SyncMessage> m_syncTX;
++    struct TimedByte { uint64 cycle; uint8 value; };
++    std::deque<TimedByte> m_syncRX;
++    std::deque<TimedByte> m_masterRX;
++    uint64 m_lastMasterByte = 0;
++    uint64 m_syncGeneration = 0, m_syncPeerProgress = 0, m_syncLastPeerByte = 0;
++    uint32 m_syncPeerClock = 0;
++    bool m_syncHello = false;
++    // Emulation thread owns these; also protected by m_syncMutex.
++    uint64 m_syncBoundGeneration = 0, m_syncOrigin = 0, m_syncRevision = 0;
++    uint64 m_syncBoundary = kSyncQuantum, m_syncPublished = 0;
++    uint32 m_syncClock = 0;
++    bool m_masterSCI = false;
++    std::atomic<bool> m_stop{false};
++    std::thread m_thread;
++
++    mutable std::mutex m_errorMutex;
++    std::string m_error;
++    std::mutex m_notificationMutex;
++    std::vector<std::string> m_notifications;
++
++    std::mutex m_txMutex;
++    std::condition_variable m_txCV;
++    std::deque<QueuedByte> m_tx;
++    std::mutex m_rxMutex;
++    std::deque<QueuedByte> m_rx;
++    std::atomic<size_t> m_rxCount{0};
++    std::atomic<size_t> m_peakRxCount{0};
++    std::atomic<size_t> m_peakTxCount{0};
++    std::atomic<size_t> m_windowPeakRxCount{0};
++    std::atomic<size_t> m_windowPeakTxCount{0};
++    std::atomic<uint64_t> m_longestSendWaitUs{0};
++    std::atomic<uint64_t> m_longestReceiveWaitUs{0};
++    std::atomic<uint64_t> m_largestReceiveBatch{0};
++    std::atomic<uint64_t> m_windowSendWaitUs{0};
++    std::atomic<uint64_t> m_windowReceiveWaitUs{0};
++    std::atomic<uint64_t> m_windowReceiveBatch{0};
++    std::atomic<uint64_t> m_emulatedFrames{0};
++    std::atomic<uint64_t> m_windowFrameGapUs{0};
++    // Accessed only by the emulation thread.
++    std::chrono::steady_clock::time_point m_previousFrameAt{};
++    std::atomic<uint8> m_sciControl{0};
++    std::atomic<uint8> m_sciStatus{0};
++    std::atomic<uint64_t> m_sciReceived{0};
++    std::atomic<uint64_t> m_dmaReceived{0};
++    std::atomic<uint64_t> m_dmaTransmitted{0};
++    std::atomic<uint64_t> m_rxFlagCleared{0};
++    std::atomic<uint64_t> m_transmitted{0};
++    std::atomic<uint64_t> m_sent{0};
++    std::atomic<uint64_t> m_received{0};
++    std::atomic<uint64_t> m_delivered{0};
++    mutable std::mutex m_diagnosticsMutex;
++    std::array<uint64_t, 256> m_transmittedBytes{};
++    std::array<uint64_t, 256> m_receivedBytes{};
++    std::ofstream m_diagnosticsLog;
++    std::ofstream m_byteTraceLog;
++    std::filesystem::path m_liveTracePath;
++    std::atomic<CaptureState> m_captureState{CaptureState::Unavailable};
++    struct LiveTraceEvent { uint64_t sequence; ByteTraceEvent event; };
++    std::vector<LiveTraceEvent> m_liveEvents;
++    uint64_t m_liveCursor = 0;
++    uint64_t m_liveDropped = 0;
++    int64_t m_liveCaptureId = 0;
++    std::chrono::steady_clock::time_point m_liveDeadline{};
++    std::chrono::steady_clock::time_point m_liveSampleAt{};
++    std::ofstream m_initializationLog;
++    std::vector<ByteTraceEvent> m_initializationEvents;
++    uint64 m_initializationDropped = 0;
++    struct LifecycleEvent {
++        int64_t epochUs;
++        uint64 frame;
++        char event;
++        uint32 value;
++        uint64 sourceTimestampNs;
++    };
++    std::ofstream m_lifecycleLog;
++    std::deque<LifecycleEvent> m_lifecycleEvents;
++    uint64 m_lifecycleDropped = 0;
++    bool m_byteTraceEnabled = false;
++    std::vector<ByteTraceEvent> m_byteTrace;
++    size_t m_byteTraceNext = 0;
++    size_t m_byteTraceCount = 0;
++    uint64_t m_byteTraceTotal = 0;
++    uint64_t m_cableByteTraceTotal = 0;
++    uint64_t m_lastDumpCableByteTotal = 0;
++    std::chrono::steady_clock::time_point m_lastByteTraceAt{};
++    std::chrono::steady_clock::time_point m_lastTcpReceiveAt{};
++    int64_t m_traceEpochUs = 0;
++    std::chrono::steady_clock::time_point m_traceStarted{};
++    std::chrono::steady_clock::time_point m_previousTraceSample{};
++    uint64_t m_previousFrames = 0;
++    uint64_t m_previousTransmitted = 0;
++    uint64_t m_previousSent = 0;
++    uint64_t m_previousReceived = 0;
++    uint64_t m_previousDelivered = 0;
++};
++
++} // namespace app::services
+diff --git a/apps/ymir-sdl3/src/app/services/link_cable_sync.inc b/apps/ymir-sdl3/src/app/services/link_cable_sync.inc
+new file mode 100644
+index 0000000..2a08f45
+--- /dev/null
++++ b/apps/ymir-sdl3/src/app/services/link_cable_sync.inc
+@@ -0,0 +1,300 @@
++// Included inside app::services, with socket helpers in scope.
++// V1: ordered 24-byte records, three big-endian u64s: magic/type, cycle, value.
++// Only byte-record payloads can reach guest SCI; no protocol header is forwarded.
++namespace {
++constexpr uint64 kSyncMagic = 0x594c533100000000ULL; // YLS1
++constexpr uint64 kHello = 0, kByte = 1, kProgress = 2;
++constexpr uint64 kMasterByte = 3;
++uint64 ReadSyncWord(const uint8 *p) {
++    uint64 value = 0;
++    for (int i = 0; i < 8; ++i) value = (value << 8) | p[i];
++    return value;
++}
++}
++
++void LinkCableService::SyncError(const char *message) {
++    m_syncFault.store(true);
++    Fail(message);
++    m_syncCV.notify_all();
++}
++
++void LinkCableService::QueueSyncMessage(uint64 type, uint64 cycle, uint64 value) {
++    if (m_syncTX.size() >= 65536) {
++        SyncError("Synchronized link send queue overflow");
++        return;
++    }
++    SyncMessage packet{};
++    const uint64 words[]{kSyncMagic | type, cycle, value};
++    for (int w = 0; w < 3; ++w)
++        for (int b = 0; b < 8; ++b) packet[w * 8 + b] = uint8(words[w] >> (56 - b * 8));
++    m_syncTX.push_back(packet);
++    m_syncCV.notify_all();
++}
++
++uint64 LinkCableService::AdvanceSynchronized(uint64 cycle, uint64 revision, uint32 clockTag,
++                                             const std::function<bool()> &cancelled) {
++    constexpr uint64 unlimited = ~uint64{0};
++    if (!m_synchronized || GetState() != State::Connected || m_stop.load()) return unlimited;
++    std::unique_lock lock{m_syncMutex};
++    if (m_syncBoundGeneration != m_syncGeneration) {
++        m_syncBoundGeneration = m_syncGeneration;
++        m_syncOrigin = cycle;
++        m_syncRevision = revision;
++        m_syncClock = clockTag;
++        m_syncBoundary = kSyncQuantum;
++        m_syncPublished = 0;
++    }
++    if (revision != m_syncRevision || cycle < m_syncOrigin || clockTag != m_syncClock) {
++        SyncError("Synchronized link timeline changed; reconnecting with a fresh session");
++        return unlimited;
++    }
++    const uint64 now = cycle - m_syncOrigin;
++    if (now < m_syncBoundary) return m_syncBoundary - now;
++    if (now >= m_syncBoundary + kSyncQuantum) {
++        SyncError("Synchronized link core exceeded its cycle budget");
++        return unlimited;
++    }
++    if (m_syncPublished != m_syncBoundary) {
++        QueueSyncMessage(kProgress, m_syncBoundary, clockTag);
++        m_syncPublished = m_syncBoundary;
++    }
++    const uint64 generation = m_syncGeneration;
++    if constexpr (kDiagnostics) ++m_barriers;
++    // One clock pair per boundary, not per CPU slice or byte. Includes the
++    // unlocked UI callback and scheduling delays while waiting for the peer.
++    struct WaitTimer {
++        std::atomic<uint64> &total;
++        std::chrono::steady_clock::time_point start = kDiagnostics ? std::chrono::steady_clock::now()
++                                                                 : std::chrono::steady_clock::time_point{};
++        ~WaitTimer() {
++            if constexpr (kDiagnostics) total.fetch_add(std::chrono::duration_cast<std::chrono::nanoseconds>(
++                std::chrono::steady_clock::now() - start).count(), std::memory_order_relaxed);
++        }
++    } waitTimer{m_syncWaitNs};
++    while (m_syncPeerProgress < m_syncBoundary && !m_stop.load() && !m_syncFault.load() &&
++           GetState() == State::Connected && generation == m_syncGeneration) {
++        m_syncWaiting.store(true);
++        lock.unlock();
++        const bool cancel = cancelled();
++        lock.lock();
++        if (cancel) { m_syncWaiting.store(false); return 0; }
++        // Progress can arrive while the UI callback runs with the mutex unlocked.
++        // Recheck before sleeping so that notification is not lost.
++        m_syncCV.wait_for(lock, std::chrono::milliseconds(1), [&] {
++            return m_syncPeerProgress >= m_syncBoundary || m_stop.load() || m_syncFault.load() ||
++                   GetState() != State::Connected || generation != m_syncGeneration;
++        });
++    }
++    m_syncWaiting.store(false);
++    if (m_stop.load() || m_syncFault.load() || GetState() != State::Connected || generation != m_syncGeneration)
++        return unlimited;
++    if (m_syncPeerClock != clockTag) {
++        SyncError("Synchronized link clock modes differ; use matching video and CPU clock settings");
++        return unlimited;
++    }
++    m_syncBoundary += kSyncQuantum;
++    return m_syncBoundary - now;
++}
++
++void LinkCableService::TransmitTimed(uint8 value, uint64 cycle) {
++    if (!m_synchronized) { Transmit(value); return; }
++    std::lock_guard lock{m_syncMutex};
++    if (GetState() != State::Connected || m_stop.load() || m_syncFault.load() ||
++        m_syncBoundGeneration != m_syncGeneration || cycle < m_syncOrigin) return;
++    QueueSyncMessage(kByte, cycle - m_syncOrigin, value);
++    m_transmitted.fetch_add(1);
++    std::lock_guard traceLock{m_diagnosticsMutex};
++    ++m_transmittedBytes[value];
++    const auto index = m_byteTraceNext;
++    RecordByteTraceLocked('T', value, std::chrono::steady_clock::now());
++    if (m_byteTraceEnabled) m_byteTrace[index].cycle = cycle;
++}
++
++void LinkCableService::TransmitSCI(bool master, uint8 value, uint64 cycle) {
++    if (!m_dualSCI) { TransmitTimed(value, cycle); return; }
++    std::lock_guard lock{m_syncMutex};
++    if (GetState() != State::Connected || m_stop.load() || m_syncFault.load()) return;
++    if (m_synchronized && (m_syncBoundGeneration != m_syncGeneration || cycle < m_syncOrigin)) return;
++    QueueSyncMessage(master ? kMasterByte : kByte, m_synchronized ? cycle - m_syncOrigin : 0, value);
++    if constexpr (kDiagnostics) m_lastActiveMaster.store(master);
++    ++m_transmitted;
++    if constexpr (kDiagnostics) {
++    std::lock_guard traceLock{m_diagnosticsMutex};
++    ++m_transmittedBytes[value];
++    const auto index = m_byteTraceNext;
++    RecordByteTraceLocked(master ? 't' : 'T', value, std::chrono::steady_clock::now());
++    if (m_byteTraceEnabled) m_byteTrace[index].cycle = cycle;
++    }
++}
++
++std::optional<uint8> LinkCableService::ReceiveSCI(bool master, uint64 cycle) {
++    if (!m_dualSCI) return ReceiveTimed(cycle);
++    std::lock_guard lock{m_syncMutex};
++    auto &queue = master ? m_masterRX : m_syncRX;
++    if (GetState() != State::Connected || m_stop.load() || m_syncFault.load() || queue.empty()) return {};
++    if (m_synchronized && (m_syncBoundGeneration != m_syncGeneration || cycle < m_syncOrigin ||
++        cycle - m_syncOrigin < queue.front().cycle + kSyncQuantum)) return {};
++    const uint8 value = queue.front().value;
++    queue.pop_front();
++    m_rxCount.store(m_syncRX.size() + m_masterRX.size());
++    if constexpr (kDiagnostics) m_lastActiveMaster.store(master);
++    ++m_delivered;
++    if constexpr (kDiagnostics) {
++    std::lock_guard traceLock{m_diagnosticsMutex};
++    const auto index = m_byteTraceNext;
++    RecordByteTraceLocked(master ? 'r' : 'R', value, std::chrono::steady_clock::now());
++    if (m_byteTraceEnabled) m_byteTrace[index].cycle = cycle;
++    }
++    return value;
++}
++
++std::optional<uint8> LinkCableService::ReceiveTimed(uint64 cycle) {
++    if (!m_synchronized) return Receive();
++    std::lock_guard lock{m_syncMutex};
++    if (GetState() != State::Connected || m_stop.load() || m_syncFault.load() ||
++        m_syncBoundGeneration != m_syncGeneration || cycle < m_syncOrigin || m_syncRX.empty()) return {};
++    // Fixed one-quantum virtual cable latency, independent of wall-clock jitter.
++    if (cycle - m_syncOrigin < m_syncRX.front().cycle + kSyncQuantum) return {};
++    const uint8 value = m_syncRX.front().value;
++    m_syncRX.pop_front();
++    m_rxCount.store(m_syncRX.size());
++    ++m_delivered;
++    std::lock_guard traceLock{m_diagnosticsMutex};
++    RecordByteTraceLocked('R', value, std::chrono::steady_clock::now());
++    return value;
++}
++
++bool LinkCableService::ParseSyncMessage(const SyncMessage &message) {
++    const uint64 header = ReadSyncWord(message.data());
++    const uint64 cycle = ReadSyncWord(message.data() + 8);
++    const uint64 value = ReadSyncWord(message.data() + 16);
++    const uint64 type = header & 0xffffffff;
++    if ((header & 0xffffffff00000000ULL) != kSyncMagic) {
++        SyncError("Incompatible link peer: both instances must use the synchronized preview"); return false;
++    }
++    std::lock_guard lock{m_syncMutex};
++    if (!m_syncHello) {
++        const uint64 mode = m_dualSCI ? (m_synchronized ? 3 : 2) : uint64(m_masterSCI);
++        if (type != kHello || cycle != kSyncQuantum || value != mode) {
++            SyncError("Synchronized link handshake/version/SCI routing mismatch"); return false;
++        }
++        m_syncHello = true;
++        m_state.store(State::Connected, std::memory_order_release);
++    } else if (type == kByte || (m_dualSCI && type == kMasterByte)) {
++        auto &queue = type == kMasterByte ? m_masterRX : m_syncRX;
++        auto &lastByte = type == kMasterByte ? m_lastMasterByte : m_syncLastPeerByte;
++        if (value > 255 || (m_synchronized && (cycle < lastByte || cycle < m_syncPeerProgress ||
++            cycle > m_syncPeerProgress + 2 * kSyncQuantum)) ||
++            (!m_synchronized && cycle != 0) || m_syncRX.size() + m_masterRX.size() >= kMaxQueuedBytes) {
++            SyncError("Invalid synchronized link byte order/range or receive queue overflow"); return false;
++        }
++        lastByte = cycle;
++        queue.push_back({cycle, uint8(value)});
++        m_rxCount.store(m_syncRX.size() + m_masterRX.size());
++        RecordMaximum(m_peakRxCount, m_syncRX.size() + m_masterRX.size());
++        ++m_received;
++        if constexpr (kDiagnostics) {
++        std::lock_guard traceLock{m_diagnosticsMutex};
++        ++m_receivedBytes[value];
++        }
++    } else if (type == kProgress && m_synchronized) {
++        if (cycle != m_syncPeerProgress + kSyncQuantum || value > UINT32_MAX) {
++            SyncError("Invalid synchronized link progress sequence"); return false;
++        }
++        m_syncPeerProgress = cycle;
++        m_syncPeerClock = uint32(value);
++    } else {
++        SyncError("Invalid synchronized link message type"); return false;
++    }
++    m_syncCV.notify_all();
++    return true;
++}
++
++void LinkCableService::RunSynchronizedSession(uintptr_t handle) {
++    const Socket peer = static_cast<Socket>(handle);
++    m_state.store(State::Connecting);
++    {
++        std::lock_guard lock{m_syncMutex};
++        m_syncTX.clear(); m_syncRX.clear(); m_masterRX.clear(); m_rxCount.store(0);
++        m_lastMasterByte = 0;
++        m_syncPeerProgress = m_syncLastPeerByte = 0;
++        m_syncPeerClock = 0;
++        m_syncHello = false;
++        ++m_syncGeneration;
++        m_syncFault.store(false);
++        QueueSyncMessage(kHello, kSyncQuantum, m_dualSCI ? (m_synchronized ? 3 : 2) : uint64(m_masterSCI));
++    }
++    std::atomic<bool> done{false};
++    const auto stopped = [&] { return done.load() || m_stop.load() || m_syncFault.load(); };
++    std::thread sender{[&] {
++        while (!stopped()) {
++            std::vector<SyncMessage> packets;
++            {
++                std::unique_lock lock{m_syncMutex};
++                m_syncCV.wait(lock, [&] { return stopped() || !m_syncTX.empty(); });
++                if (stopped()) break;
++                while (!m_syncTX.empty() && packets.size() < 64) {
++                    packets.push_back(m_syncTX.front()); m_syncTX.pop_front();
++                }
++            }
++            const char *data = reinterpret_cast<const char *>(packets.data());
++            const size_t size = packets.size() * sizeof(SyncMessage);
++            size_t offset = 0;
++            while (offset < size && !stopped()) {
++                int flags = 0;
++#ifdef MSG_NOSIGNAL
++                flags = MSG_NOSIGNAL;
++#endif
++                const int count = send(peer, data + offset, static_cast<int>(size - offset), flags);
++                if (count < 0 && IsInProgress()) {
++                    if (WaitSocket(peer, false, true) < 0) SyncError("Synchronized link send wait failed");
++                    continue;
++                }
++                if (count <= 0) { SyncError("Synchronized link send failed"); break; }
++                offset += count;
++            }
++            if (offset == size) for (const auto &packet : packets)
++                if (ReadSyncWord(packet.data()) == (kSyncMagic | kByte) ||
++                    ReadSyncWord(packet.data()) == (kSyncMagic | kMasterByte)) ++m_sent;
++        }
++    }};
++    SyncMessage input{};
++    std::array<uint8, sizeof(SyncMessage) * 64> received{};
++    size_t used = 0;
++    const auto handshakeDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
++    while (!stopped()) {
++        const int ready = WaitSocket(peer, true, false);
++        if (ready < 0) { SyncError("Synchronized link socket error"); break; }
++        if (ready > 0) {
++            // Drain a batch rather than issuing select/recv for every 24-byte
++            // record. Preserve stream order and incomplete records across reads.
++            const int count = recv(peer, reinterpret_cast<char *>(received.data()), int(received.size()), 0);
++            if (count < 0 && IsInProgress()) continue;
++            if (count <= 0) { SyncError("Synchronized link peer disconnected"); break; }
++            size_t offset = 0;
++            bool valid = true;
++            while (offset < size_t(count)) {
++                const size_t chunk = std::min(input.size() - used, size_t(count) - offset);
++                std::copy_n(received.data() + offset, chunk, input.data() + used);
++                used += chunk;
++                offset += chunk;
++                if (used == input.size()) {
++                    if (!ParseSyncMessage(input)) { valid = false; break; }
++                    used = 0;
++                }
++            }
++            if (!valid) break;
++        }
++        if (GetState() != State::Connected && std::chrono::steady_clock::now() > handshakeDeadline) {
++            SyncError("Synchronized link handshake timed out (legacy peers are not supported)"); break;
++        }
++        // No continuous diagnostic file I/O in the synchronized receive path.
++        if constexpr (kDiagnostics) UpdateLiveCapture(std::chrono::steady_clock::now());
++    }
++    done.store(true);
++    m_syncCV.notify_all();
++    sender.join();
++    if (GetState() == State::Connected) m_state.store(State::Disconnected);
++    m_syncCV.notify_all();
++    if constexpr (kDiagnostics) UpdateLiveCapture(std::chrono::steady_clock::now(), true);
++}
+diff --git a/apps/ymir-sdl3/src/app/services/window_manager_service.cpp b/apps/ymir-sdl3/src/app/services/window_manager_service.cpp
+index c8274f7..f9b3c0a 100644
+--- a/apps/ymir-sdl3/src/app/services/window_manager_service.cpp
++++ b/apps/ymir-sdl3/src/app/services/window_manager_service.cpp
+@@ -16,7 +16,8 @@
+ 
+ namespace app::services {
+ 
+-WindowManagerService::WindowManagerService(SharedContext &context, Settings &settings)
++WindowManagerService::WindowManagerService(SharedContext &context, Settings &settings,
++                                           LinkCableService &linkCableService)
+     : m_context(context)
+     , m_settings(settings)
+     , m_systemStateWindow(m_context)
+@@ -28,7 +29,7 @@ WindowManagerService::WindowManagerService(SharedContext &context, Settings &set
+     , m_vdpWindowSet(m_context)
+     , m_cdblockWindowSet(m_context)
+     , m_debugOutputWindow(m_context)
+-    , m_settingsWindow(m_context)
++    , m_settingsWindow(m_context, linkCableService)
+     , m_periphConfigWindow(m_context)
+     , m_messageHistoryWindow(m_context)
+     , m_aboutWindow(m_context)
+diff --git a/apps/ymir-sdl3/src/app/services/window_manager_service.hpp b/apps/ymir-sdl3/src/app/services/window_manager_service.hpp
+index b452fb3..d3b7c9d 100644
+--- a/apps/ymir-sdl3/src/app/services/window_manager_service.hpp
++++ b/apps/ymir-sdl3/src/app/services/window_manager_service.hpp
+@@ -26,10 +26,12 @@
+ 
+ namespace app::services {
+ 
++class LinkCableService;
++
+ /// @brief Manages settings, debugger windows, and modal popups.
+ class WindowManagerService {
+ public:
+-    explicit WindowManagerService(SharedContext &context, Settings &settings);
++    explicit WindowManagerService(SharedContext &context, Settings &settings, LinkCableService &linkCableService);
+     ~WindowManagerService() = default;
+ 
+     WindowManagerService(const WindowManagerService &) = delete;
+diff --git a/apps/ymir-sdl3/src/app/settings.cpp b/apps/ymir-sdl3/src/app/settings.cpp
+index 30eb964..a50262e 100644
+--- a/apps/ymir-sdl3/src/app/settings.cpp
++++ b/apps/ymir-sdl3/src/app/settings.cpp
+@@ -1029,6 +1029,7 @@ void Settings::ResetToDefaults() {
+     general.pauseWhenUnfocused = false;
+     general.unpauseOnDiscLoad = true;
+     general.startPaused = false;
++    general.linkSynchronization = 0;
+ 
+     general.checkForUpdates = false;
+     general.includeNightlyBuilds = false;
+@@ -1235,6 +1236,8 @@ SettingsLoadResult Settings::Load(const std::filesystem::path &path) {
+         Parse(tblGeneral, "PauseWhenUnfocused", general.pauseWhenUnfocused);
+         Parse(tblGeneral, "UnpauseOnDiscLoadd", general.unpauseOnDiscLoad);
+         Parse(tblGeneral, "StartPaused", general.startPaused);
++        Parse(tblGeneral, "LinkSynchronization", general.linkSynchronization);
++        general.linkSynchronization = std::clamp(general.linkSynchronization, 0, 1);
+         Parse(tblGeneral, "CheckForUpdates", general.checkForUpdates);
+         Parse(tblGeneral, "IncludeNightlyBuilds", general.includeNightlyBuilds);
+         Parse(tblGeneral, "EnableDiscordPresence", general.enableDiscordPresence);
+@@ -1884,6 +1887,7 @@ SettingsSaveResult Settings::Save() {
+             {"PauseWhenUnfocused", general.pauseWhenUnfocused},
+             {"UnpauseOnDiscLoad", general.unpauseOnDiscLoad},
+             {"StartPaused", general.startPaused},
++            {"LinkSynchronization", general.linkSynchronization},
+             {"CheckForUpdates", general.checkForUpdates},
+             {"IncludeNightlyBuilds", general.includeNightlyBuilds},
+             {"EnableDiscordPresence", general.enableDiscordPresence},
+diff --git a/apps/ymir-sdl3/src/app/settings.hpp b/apps/ymir-sdl3/src/app/settings.hpp
+index cc13ede..1075120 100644
+--- a/apps/ymir-sdl3/src/app/settings.hpp
++++ b/apps/ymir-sdl3/src/app/settings.hpp
+@@ -159,6 +159,8 @@ struct Settings {
+         bool pauseWhenUnfocused;
+         bool unpauseOnDiscLoad;
+         bool startPaused;
++        // 0/1 disable/enable link synchronization. Applied at startup.
++        int linkSynchronization = 0;
+ 
+         bool checkForUpdates;
+         bool includeNightlyBuilds;
+diff --git a/apps/ymir-sdl3/src/app/ui/defs/settings_defs.hpp b/apps/ymir-sdl3/src/app/ui/defs/settings_defs.hpp
+index cce362e..3d2074e 100644
+--- a/apps/ymir-sdl3/src/app/ui/defs/settings_defs.hpp
++++ b/apps/ymir-sdl3/src/app/ui/defs/settings_defs.hpp
+@@ -2,6 +2,6 @@
+ 
+ namespace app::ui {
+ 
+-enum class SettingsTab { None, General, GUI, Hotkeys, System, IPL, Input, Video, Audio, Cartridge, CDBlock, Tweaks };
++enum class SettingsTab { None, General, GUI, Hotkeys, System, IPL, Input, Video, Audio, Cartridge, CDBlock, SerialPort, Tweaks };
+ 
+ } // namespace app::ui
+diff --git a/apps/ymir-sdl3/src/app/ui/views/settings/serial_port_settings_view.cpp b/apps/ymir-sdl3/src/app/ui/views/settings/serial_port_settings_view.cpp
+new file mode 100644
+index 0000000..4b5be76
+--- /dev/null
++++ b/apps/ymir-sdl3/src/app/ui/views/settings/serial_port_settings_view.cpp
+@@ -0,0 +1,134 @@
++#include "serial_port_settings_view.hpp"
++
++#include <algorithm>
++#include <imgui.h>
++#ifdef YMIR_XBAND_FRONTEND
++#include <frontend_modem.hpp>
++#include <app/events/emu_event_factory.hpp>
++#include <cstdio>
++#include <cstdlib>
++#endif
++
++namespace app::ui {
++
++SerialPortSettingsView::SerialPortSettingsView(SharedContext &context, services::LinkCableService &linkCableService)
++    : SettingsViewBase(context)
++    , m_linkCableService(linkCableService) {
++    // Keep framed dual-lane sessions away from older raw-byte preview builds.
++    if (m_linkCableService.UsesDualSCI()) m_port = 32458;
++}
++
++void SerialPortSettingsView::EnableLocalAuto() {
++    m_enabled = true;
++    m_mode = 0;
++    if (m_linkCableService.UsesDualSCI()) m_port = 32458;
++    else if (m_linkCableService.UsesSynchronization()) m_port = 32457;
++    m_linkCableService.AutoConnectLocal(static_cast<uint16>(m_port));
++}
++
++void SerialPortSettingsView::Display() {
++#ifdef YMIR_XBAND_FRONTEND
++    auto &modem=m_context.serviceLocator.GetRequired<::xband::ymir_adapter::FrontendModem>();
++    const auto modemState=modem.snapshot();
++    ImGui::SeparatorText("XBAND cartridge modem (preview)");
++    ImGui::TextWrapped("Separate from the battle cable. Requires the private preview server. Settings apply to this session only.");
++    ImGui::BeginDisabled(modemState.enabled);
++    ImGui::InputText("Server IPv4",m_modemHost,sizeof(m_modemHost));
++    ImGui::InputInt("Server base port",&m_modemPort);
++    ImGui::Checkbox("Allow private LAN (plain TCP)",&m_modemLAN);
++    ImGui::Combo("Modem endpoint",&m_modemSide,"Saturn 1\0Saturn 2\0");
++    ImGui::InputText("Own telephone number",m_modemPhone,sizeof(m_modemPhone));
++    ImGui::EndDisabled();
++    ImGui::BeginDisabled(!modemState.enabled && m_modemPhone[0]=='\0');
++    if(ImGui::Button(modemState.enabled?"Disconnect modem":"Connect modem")){
++        ::xband::ymir_adapter::FrontendModem::Config config;
++        config.enabled=!modemState.enabled;config.address=m_modemHost;config.port=m_modemPort;
++        config.side=m_modemSide;config.phone=m_modemPhone;config.allowLAN=m_modemLAN;
++        if(config.enabled){m_linkCableService.Disconnect();m_enabled=false;}
++        modem.request(std::move(config));
++        m_context.EnqueueEvent(events::emu::RunFunction([](SharedContext&){}));
++    }
++    ImGui::EndDisabled();
++    ImGui::TextWrapped("Modem: %s",modemState.status.c_str());
++    ImGui::Text("Carrier: %s | TX %llu | RX %llu",modemState.carrier?"ON":"OFF",
++        static_cast<unsigned long long>(modemState.sent),static_cast<unsigned long long>(modemState.received));
++    ImGui::TextWrapped("Enter a distinct telephone number for each endpoint. Connect before booting the game. Reset/load-state during a call requires a new server session.");
++    ImGui::SeparatorText("Virtual media card (experimental)");
++    ImGui::TextWrapped("Explicit 13-byte card image only. No identity generation, automatic refill or server charging policy. Card bytes persist independently of game save states.");
++    ImGui::BeginDisabled(modemState.enabled||modemState.virtualCardConfigured);
++    ImGui::InputText("Card image path (UTF-8)",m_virtualCardPath,sizeof(m_virtualCardPath));
++    ImGui::BeginDisabled(m_virtualCardPath[0]=='\0');
++    if(ImGui::Button("Load card image")){
++        modem.requestCardImage(std::filesystem::u8path(m_virtualCardPath));
++        m_context.EnqueueEvent(events::emu::RunFunction([](SharedContext&){}));
++    }
++    ImGui::EndDisabled();ImGui::EndDisabled();
++    ImGui::TextWrapped("Load while the modem is disconnected. Restart Ymir to select a different card image. Loading alone does not insert the card.");
++    ImGui::BeginDisabled(!modemState.virtualCardConfigured);
++    if(ImGui::Button(modemState.virtualCardInserted?"Eject virtual card":"Insert virtual card")){
++        modem.requestCardInsertion(!modemState.virtualCardInserted);
++        m_context.EnqueueEvent(events::emu::RunFunction([](SharedContext&){}));
++    }
++    ImGui::EndDisabled();
++    ImGui::Text("Card: %s",!modemState.virtualCardConfigured?"not configured":modemState.virtualCardInserted?"inserted":"ejected");
++    ImGui::SeparatorText("Battle cable");
++#endif
++    ImGui::TextWrapped("Connect two Ymir instances before entering a link battle. "
++                       "On one PC, both instances can pair automatically.");
++    ImGui::SeparatorText("Connection");
++
++    auto &settings = GetSettings();
++    bool synchronized = settings.general.linkSynchronization == 1;
++    if (ImGui::Checkbox("Synchronize linked emulation (restart required)", &synchronized)) {
++        settings.general.linkSynchronization = synchronized ? 1 : 0;
++        MakeDirty();
++    }
++    ImGui::TextWrapped("Use the same setting on both instances. Restart both after changing it. "
++                       "ON improves timing consistency but may reduce speed.");
++    if (synchronized != m_linkCableService.UsesSynchronization()) {
++        ImGui::TextUnformatted("Pending change: restart Ymir to apply. Current connection is unchanged.");
++    }
++
++    ImGui::BeginDisabled(m_enabled);
++    ImGui::Combo("Mode", &m_mode, "Same PC (automatic)\0LAN host (listen)\0LAN client (connect)\0");
++    if (m_mode == 2) {
++        ImGui::InputText("Host IPv4 address", m_host, sizeof(m_host));
++    }
++    ImGui::InputInt("TCP port", &m_port);
++    m_port = std::clamp(m_port, 1, 65535);
++    ImGui::EndDisabled();
++
++    if (ImGui::Checkbox("Enable Battle (Taisen) Cable", &m_enabled)) {
++        if (m_enabled) {
++            switch (m_mode) {
++            case 0: m_linkCableService.AutoConnectLocal(static_cast<uint16>(m_port)); break;
++            case 1: m_linkCableService.Listen(static_cast<uint16>(m_port)); break;
++            case 2: m_linkCableService.Connect(m_host, static_cast<uint16>(m_port)); break;
++            }
++        } else {
++            m_linkCableService.Disconnect();
++            m_context.DisplayMessage("Battle (Taisen) Cable disconnected");
++        }
++    }
++
++    const auto state = m_linkCableService.GetState();
++    const char *status = "Disconnected";
++    switch (state) {
++    case services::LinkCableService::State::Disconnected: break;
++    case services::LinkCableService::State::Listening: status = "Listening"; break;
++    case services::LinkCableService::State::Connecting: status = "Connecting"; break;
++    case services::LinkCableService::State::Connected: status = "Connected"; break;
++    case services::LinkCableService::State::Error: status = "Error"; break;
++    }
++    ImGui::Text("Status: %s", status);
++    if (m_linkCableService.UsesSynchronization()) {
++        ImGui::Text("Synchronization: %s",
++                    state != services::LinkCableService::State::Connected ? "inactive" :
++                    m_linkCableService.IsSyncWaiting() ? "waiting for peer" : "active");
++    }
++    if (state == services::LinkCableService::State::Error) {
++        ImGui::TextWrapped("%s", m_linkCableService.GetError().c_str());
++    }
++}
++
++} // namespace app::ui
+diff --git a/apps/ymir-sdl3/src/app/ui/views/settings/serial_port_settings_view.hpp b/apps/ymir-sdl3/src/app/ui/views/settings/serial_port_settings_view.hpp
+new file mode 100644
+index 0000000..cea1263
+--- /dev/null
++++ b/apps/ymir-sdl3/src/app/ui/views/settings/serial_port_settings_view.hpp
+@@ -0,0 +1,30 @@
++#pragma once
++
++#include "settings_view_base.hpp"
++
++#include <app/services/link_cable_service.hpp>
++
++namespace app::ui {
++
++class SerialPortSettingsView : public SettingsViewBase {
++public:
++    SerialPortSettingsView(SharedContext &context, services::LinkCableService &linkCableService);
++
++    void Display();
++    void EnableLocalAuto();
++
++private:
++    services::LinkCableService &m_linkCableService;
++    bool m_enabled = false;
++    int m_mode = 0; // 0: same-PC auto, 1: LAN host, 2: LAN client
++    char m_host[128] = "127.0.0.1";
++    int m_port = 32458;
++#ifdef YMIR_XBAND_FRONTEND
++    char m_modemHost[64]="127.0.0.1",m_modemPhone[32]="";
++    int m_modemSide=0,m_modemPort=58240;
++    bool m_modemLAN=false;
++    char m_virtualCardPath[1024]="";
++#endif
++};
++
++} // namespace app::ui
+diff --git a/apps/ymir-sdl3/src/app/ui/windows/settings_window.cpp b/apps/ymir-sdl3/src/app/ui/windows/settings_window.cpp
+index f4565fc..fcf0b87 100644
+--- a/apps/ymir-sdl3/src/app/ui/windows/settings_window.cpp
++++ b/apps/ymir-sdl3/src/app/ui/windows/settings_window.cpp
+@@ -6,7 +6,7 @@ using namespace ymir;
+ 
+ namespace app::ui {
+ 
+-SettingsWindow::SettingsWindow(SharedContext &context)
++SettingsWindow::SettingsWindow(SharedContext &context, services::LinkCableService &linkCableService)
+     : WindowBase(context)
+     , m_generalSettingsView(context)
+     , m_guiSettingsView(context)
+@@ -18,6 +18,7 @@ SettingsWindow::SettingsWindow(SharedContext &context)
+     , m_audioSettingsView(context)
+     , m_cartSettingsView(context)
+     , m_cdblockSettingsView(context)
++    , m_serialPortSettingsView(context, linkCableService)
+     , m_tweaksSettingsView(context) {
+ 
+     m_windowConfig.name = "Settings";
+@@ -29,6 +30,10 @@ void SettingsWindow::OpenTab(SettingsTab tab) {
+     RequestFocus();
+ }
+ 
++void SettingsWindow::EnableLocalAutoLink() {
++    m_serialPortSettingsView.EnableLocalAuto();
++}
++
+ void SettingsWindow::PrepareWindow() {
+     auto *vp = ImGui::GetMainViewport();
+     ImGui::SetNextWindowPos(ImVec2(vp->Pos.x + vp->Size.x * 0.5f, vp->Pos.y + vp->Size.y * 0.5f), ImGuiCond_Appearing,
+@@ -92,6 +97,10 @@ void SettingsWindow::DrawContents() {
+             m_cdblockSettingsView.Display();
+             ImGui::EndTabItem();
+         }
++        if (ImGui::BeginTabItem("Serial Port", nullptr, tabFlag(SettingsTab::SerialPort))) {
++            m_serialPortSettingsView.Display();
++            ImGui::EndTabItem();
++        }
+         if (ImGui::BeginTabItem("Tweaks", nullptr, tabFlag(SettingsTab::Tweaks))) {
+             m_tweaksSettingsView.Display();
+             ImGui::EndTabItem();
+diff --git a/apps/ymir-sdl3/src/app/ui/windows/settings_window.hpp b/apps/ymir-sdl3/src/app/ui/windows/settings_window.hpp
+index 1960e79..654be64 100644
+--- a/apps/ymir-sdl3/src/app/ui/windows/settings_window.hpp
++++ b/apps/ymir-sdl3/src/app/ui/windows/settings_window.hpp
+@@ -12,6 +12,7 @@
+ #include <app/ui/views/settings/hotkeys_settings_view.hpp>
+ #include <app/ui/views/settings/input_settings_view.hpp>
+ #include <app/ui/views/settings/ipl_settings_view.hpp>
++#include <app/ui/views/settings/serial_port_settings_view.hpp>
+ #include <app/ui/views/settings/system_settings_view.hpp>
+ #include <app/ui/views/settings/tweaks_settings_view.hpp>
+ #include <app/ui/views/settings/video_settings_view.hpp>
+@@ -20,9 +21,10 @@ namespace app::ui {
+ 
+ class SettingsWindow : public WindowBase {
+ public:
+-    SettingsWindow(SharedContext &context);
++    SettingsWindow(SharedContext &context, services::LinkCableService &linkCableService);
+ 
+     void OpenTab(SettingsTab tab);
++    void EnableLocalAutoLink();
+ 
+ protected:
+     void PrepareWindow() override;
+@@ -41,6 +43,7 @@ private:
+     AudioSettingsView m_audioSettingsView;
+     CartridgeSettingsView m_cartSettingsView;
+     CDBlockSettingsView m_cdblockSettingsView;
++    SerialPortSettingsView m_serialPortSettingsView;
+     TweaksSettingsView m_tweaksSettingsView;
+ };
+ 
+diff --git a/apps/ymir-sdl3/src/main.cpp b/apps/ymir-sdl3/src/main.cpp
+index 3a262e9..ace8359 100644
+--- a/apps/ymir-sdl3/src/main.cpp
++++ b/apps/ymir-sdl3/src/main.cpp
+@@ -38,6 +38,8 @@ int main(int argc, char **argv) {
+                           cxxopts::value(progOpts.startFastForward)->default_value("false"));
+     options.add_options()("D,debug", "Start with debug tracing enabled",
+                           cxxopts::value(progOpts.enableDebugTracing)->default_value("false"));
++    options.add_options()("link-local", "Automatically pair with another Ymir instance on this PC",
++                          cxxopts::value(progOpts.autoConnectLocalLink)->default_value("false"));
+     options.add_options()("E,exceptions", "Capture all unhandled exceptions",
+                           cxxopts::value(enableAllExceptions)->default_value("false"));
+     options.parse_positional({"disc"});
+diff --git a/apps/ymir-sdl3/src/serdes/cereal_savestate.hpp b/apps/ymir-sdl3/src/serdes/cereal_savestate.hpp
+index f86c744..9169897 100644
+--- a/apps/ymir-sdl3/src/serdes/cereal_savestate.hpp
++++ b/apps/ymir-sdl3/src/serdes/cereal_savestate.hpp
+@@ -32,7 +32,9 @@ namespace ymir::savestate {
+ //  13 = 0.3.2
+ //  14 = 0.4.0-dev  (f192e30ef2d5bbaa1c3f78de63439a36fc26a423)
+ //  15 = 0.4.0
+-inline constexpr uint32 kVersion = 15;
++//  16 = SH-2 SCI register state
++//  17 = SH-2 SCI in-flight transmit state
++inline constexpr uint32 kVersion = 17;
+ 
+ } // namespace ymir::savestate
+ 
+@@ -76,6 +78,10 @@ void serialize(Archive &ar, SystemSaveState &s) {
+ 
+ template <class Archive>
+ void serialize(Archive &ar, SH2SaveState &s, const uint32 version) {
++    // v16:
++    // - New field: SH-2 SCI register state
++    // v17:
++    // - New fields: SH-2 SCI in-flight transmit and receive timing state
+     // v13:
+     // - New fields
+     //   - uint32 fetchedOpcodes = 0
+@@ -102,7 +108,16 @@ void serialize(Archive &ar, SH2SaveState &s, const uint32 version) {
+         s.forceFetchOpcodes = true;
+         s.wbReg = 0;
+     }
+-    ar(s.bsc, s.dmac);
++    ar(s.bsc);
++    if (version >= 16) {
++        ar(s.sci);
++        if (version >= 17) {
++            ar(s.sci.txValue, s.sci.txCompleteCycle, s.sci.txBusy, s.sci.rxReadyCycle);
++        }
++    } else {
++        s.sci = {};
++    }
++    ar(s.dmac);
+     serialize(ar, s.wdt, version);
+     serialize(ar, s.divu, version);
+     serialize(ar, s.frt, version);
+@@ -117,6 +132,11 @@ void serialize(Archive &ar, SH2SaveState &s, const uint32 version) {
+     }
+ }
+ 
++template <class Archive>
++void serialize(Archive &ar, SH2SaveState::SCI &s) {
++    ar(s.SMR, s.BRR, s.SCR, s.TDR, s.SSR, s.RDR, s.observedStatus);
++}
++
+ template <class Archive>
+ void serialize(Archive &ar, SH2SaveState::BSC &s) {
+     ar(s.BCR1, s.BCR2, s.WCR, s.MCR, s.RTCSR, s.RTCNT, s.RTCOR);
+diff --git a/libs/ymir-core/include/ymir/hw/scu/scu.hpp b/libs/ymir-core/include/ymir/hw/scu/scu.hpp
+index d554d0d..f576a64 100644
+--- a/libs/ymir-core/include/ymir/hw/scu/scu.hpp
++++ b/libs/ymir-core/include/ymir/hw/scu/scu.hpp
+@@ -141,6 +141,7 @@ public:
+     void TriggerSpriteDrawEnd();
+ 
+     void TriggerExternalInterrupt0();
++    void TriggerExternalInterrupt(uint32 index);
+     void AcknowledgeExternalInterrupt();
+ 
+     // -------------------------------------------------------------------------
+diff --git a/libs/ymir-core/include/ymir/hw/sh2/sh2.hpp b/libs/ymir-core/include/ymir/hw/sh2/sh2.hpp
+index 64cbc8f..cdedb99 100644
+--- a/libs/ymir-core/include/ymir/hw/sh2/sh2.hpp
++++ b/libs/ymir-core/include/ymir/hw/sh2/sh2.hpp
+@@ -46,6 +46,26 @@ namespace ymir::sh2 {
+ 
+ class SH2 {
+ public:
++    struct SCIDiagnostics {
++        uint64 resets = 0;
++        uint64 watchdogResets = 0;
++        uint64 receiverEnabled = 0;
++        uint64 receiverDisabled = 0;
++        uint64 received = 0;
++        uint64 discardedWhileDisabled = 0;
++        uint64 receiveOverruns = 0;
++        uint64 receiveFlagCleared = 0;
++        uint64 dmaReceiveTransfers = 0;
++        uint64 dmaTransmitTransfers = 0;
++    };
++
++    [[nodiscard]] const SCIDiagnostics &GetSCIDiagnostics() const {
++        return m_sciDiagnostics;
++    }
++
++    // Emulation-thread timestamp for external SCI scheduling.
++    uint64 GetExecutionCycleCount() const;
++
+     SH2(sys::SH2Bus &bus, bool master);
+ 
+     void Reset(bool hard, bool watchdogInitiated = false);
+@@ -54,6 +74,29 @@ public:
+         m_cbAcknowledgeExternalInterrupt = callback;
+     }
+ 
++    /// @brief Connects the SCI transmitter to an external serial device.
++    void SetSCITransmitCallback(CBSerialTransmit callback) {
++        m_cbSCITransmit = callback;
++    }
++
++    /// @brief Connects the SCI receiver to an external serial device.
++    void SetSCIReceiveCallback(CBSerialReceive callback) {
++        m_cbSCIReceive = callback;
++    }
++
++    /// @brief Delivers one byte to the SCI receiver on the emulation thread.
++    /// @return true if the byte was accepted; false if reception is disabled or full.
++    bool SCIReceiveByte(uint8 value);
++
++    // Temporary diagnostic callback; invoked only on the emulation thread.
++    using CBSCITrace = util::OptionalCallback<void(char, uint8, uint64, uint32, uint8, uint8)>;
++    void SetSCITraceCallback(CBSCITrace callback) { m_cbSCITrace = callback; }
++
++    // Passive modem investigation hook. Does not replace bus handlers or values.
++    // Fields: write, CPU address, value, access bytes, current PC, emulated cycle.
++    using CBModemAccessTrace = util::OptionalCallback<void(bool, uint32, uint32, uint8, uint32, uint64)>;
++    void SetModemAccessTrace(CBModemAccessTrace callback) { m_cbModemAccessTrace = callback; }
++
+     void BindGlobalCycleCounter(const uint64 &currCountRef) {
+         m_currCount = &currCountRef;
+     }
+@@ -616,10 +659,17 @@ public:
+             case InterruptSource::FRT_OCI:
+                 return (m_sh2.FRT.FTCSR.OCFA && m_sh2.FRT.TIER.OCIAE) || (m_sh2.FRT.FTCSR.OCFB && m_sh2.FRT.TIER.OCIBE);
+             case InterruptSource::FRT_ICI: return m_sh2.FRT.FTCSR.ICF && m_sh2.FRT.TIER.ICIE;
+-            case InterruptSource::SCI_TEI: return false;     // TODO
+-            case InterruptSource::SCI_TXI: return false;     // TODO
+-            case InterruptSource::SCI_RXI: return false;     // TODO
+-            case InterruptSource::SCI_ERI: return false;     // TODO
++            case InterruptSource::SCI_TEI:
++                return (m_sh2.SCI.SCR & SerialCommunicationInterface::kTEIE) &&
++                       (m_sh2.SCI.SSR & SerialCommunicationInterface::kTEND);
++            case InterruptSource::SCI_TXI:
++                return (m_sh2.SCI.SCR & SerialCommunicationInterface::kTIE) &&
++                       (m_sh2.SCI.SSR & SerialCommunicationInterface::kTDRE);
++            case InterruptSource::SCI_RXI:
++                return (m_sh2.SCI.SCR & SerialCommunicationInterface::kRIE) &&
++                       (m_sh2.SCI.SSR & SerialCommunicationInterface::kRDRF);
++            case InterruptSource::SCI_ERI:
++                return (m_sh2.SCI.SCR & SerialCommunicationInterface::kRIE) && (m_sh2.SCI.SSR & 0x38);
+             case InterruptSource::BSC_REF_CMI: return false; // TODO
+             case InterruptSource::WDT_ITI: return m_sh2.WDT.WTCSR.OVF && !m_sh2.WDT.WTCSR.WT_nIT;
+             case InterruptSource::DMAC1_XferEnd:
+@@ -701,7 +751,7 @@ private:
+     const uint64 *m_currCount = &kNilCurrCounter;
+ 
+     // Number of cycles executed in the current Advance invocation
+-    uint64 m_cyclesExecuted;
++    uint64 m_cyclesExecuted = 0;
+ 
+     // Retrieves the current absolute cycle count
+     uint64 GetCurrentCycleCount() const;
+@@ -835,7 +885,30 @@ private:
+ 
+     // --- SCI module ---
+ 
+-    // TODO
++    SerialCommunicationInterface SCI;
++    SCIDiagnostics m_sciDiagnostics;
++    CBSCITrace m_cbSCITrace;
++    CBModemAccessTrace m_cbModemAccessTrace;
++    void TraceModemAccess(bool write, uint32 address, uint32 value, uint8 width) {
++        const uint32 physical = address & 0x07FFFFFF;
++        if ((physical >= 0x05895000 && physical <= 0x0589503F) ||
++            (physical >= 0x0582503C && physical <= 0x0582503F) ||
++            (physical >= 0x00100000 && physical <= 0x0010007F) ||
++            (physical >= 0x04FFFFFC && physical <= 0x04FFFFFF)) {
++            m_cbModemAccessTrace(write, address, value, width, PC, GetCurrentCycleCount());
++        }
++    }
++    void TraceSCI(char event, uint8 value) {
++        m_cbSCITrace(event, value, GetCurrentCycleCount(), PC, SCI.SCR, SCI.SSR);
++    }
++
++    CBSerialTransmit m_cbSCITransmit;
++    CBSerialReceive m_cbSCIReceive;
++
++    void SCITransmitByte(uint8 value);
++    void AdvanceSCI();
++    void DiscardSCIReceive();
++    void PollSCIReceive();
+ 
+     // --- BSC module ---
+ 
+@@ -1075,6 +1148,10 @@ private:
+     bool CheckWatchpoint(const DecodedMemAccesses::Access &access);
+ 
+     const std::string_view m_logPrefix; // For devlogs
++    // Opt-in VF XBAND ROM checkpoints; register observation only.
++    bool m_xbandPostmatchTrace = false;
++    unsigned m_xbandPostmatchTraceLines = 0;
++    void TraceXBANDPostmatch(uint32 pc);
+ 
+     // -------------------------------------------------------------------------
+     // Helper functions
+diff --git a/libs/ymir-core/include/ymir/hw/sh2/sh2_internal_callbacks.hpp b/libs/ymir-core/include/ymir/hw/sh2/sh2_internal_callbacks.hpp
+index 2a99089..1a1ca02 100644
+--- a/libs/ymir-core/include/ymir/hw/sh2/sh2_internal_callbacks.hpp
++++ b/libs/ymir-core/include/ymir/hw/sh2/sh2_internal_callbacks.hpp
+@@ -6,10 +6,19 @@
+ */
+ 
+ #include <ymir/util/callback.hpp>
++#include <ymir/core/types.hpp>
++
++#include <optional>
+ 
+ namespace ymir::sh2 {
+ 
+ /// @brief Invoked when the SH2 acknowledges an external interrupt signal.
+ using CBAcknowledgeExternalInterrupt = util::RequiredCallback<void()>;
+ 
++/// @brief Sends one byte from the SH-2 SCI to an external serial device.
++using CBSerialTransmit = util::OptionalCallback<void(uint8)>;
++
++/// @brief Retrieves a pending byte from an external serial device, if any.
++using CBSerialReceive = util::OptionalCallback<std::optional<uint8>()>;
++
+ } // namespace ymir::sh2
+diff --git a/libs/ymir-core/include/ymir/hw/sh2/sh2_sci.hpp b/libs/ymir-core/include/ymir/hw/sh2/sh2_sci.hpp
+index c5caae7..a178464 100644
+--- a/libs/ymir-core/include/ymir/hw/sh2/sh2_sci.hpp
++++ b/libs/ymir-core/include/ymir/hw/sh2/sh2_sci.hpp
+@@ -1,5 +1,7 @@
+ #pragma once
+ 
++#include <ymir/core/types.hpp>
++
+ namespace ymir::sh2 {
+ 
+ // addr r/w  access   init      code    name
+@@ -27,3 +29,109 @@ namespace ymir::sh2 {
+ // 005  R    8        00        RDR     Receive Data Register
+ 
+ } // namespace ymir::sh2
++
++namespace ymir::sh2 {
++
++/// @brief SH7604 serial communication interface register state.
++///
++/// The external serial connection is deliberately kept outside the SH-2 core.
++/// The owner delivers received bytes on the emulation thread and receives
++/// transmitted bytes through a callback.
++struct SerialCommunicationInterface {
++    static constexpr uint8 kTDRE = 0x80;
++    static constexpr uint8 kRDRF = 0x40;
++    static constexpr uint8 kORER = 0x20;
++    static constexpr uint8 kTEND = 0x04;
++    static constexpr uint8 kTIE = 0x80;
++    static constexpr uint8 kRIE = 0x40;
++    static constexpr uint8 kTE = 0x20;
++    static constexpr uint8 kRE = 0x10;
++    static constexpr uint8 kTEIE = 0x04;
++
++    uint8 SMR = 0x00;
++    uint8 BRR = 0xFF;
++    uint8 SCR = 0x00;
++    uint8 TDR = 0xFF;
++    uint8 SSR = kTDRE | kTEND;
++    uint8 RDR = 0x00;
++
++    // Flags may only be cleared after the guest has observed them in SSR.
++    uint8 observedStatus = 0;
++
++    // The transmit shift register is separate from TDR. Keep the byte and its
++    // completion time so DMA cannot send an entire buffer in one emulation step.
++    uint8 txValue = 0;
++    uint64 txCompleteCycle = 0;
++    bool txBusy = false;
++    uint64 rxReadyCycle = 0;
++
++    void Reset() {
++        *this = {};
++    }
++
++    template <bool peek>
++    uint8 ReadSSR() {
++        if constexpr (!peek) {
++            observedStatus |= SSR;
++        }
++        return SSR;
++    }
++
++    /// @return true if clearing TDRE started a CPU-driven transmission.
++    template <bool poke>
++    bool WriteSSR(uint8 value) {
++        if constexpr (poke) {
++            SSR = (value & ~kTEND) | (SSR & kTEND);
++            observedStatus = 0;
++            return false;
++        } else {
++            const uint8 clear = SSR & observedStatus & ~value & 0xF8;
++            SSR &= ~clear;
++            observedStatus &= ~clear;
++            const bool transmit = (clear & kTDRE) && (SCR & kTE);
++            if (transmit) {
++                SSR &= ~kTEND;
++            }
++            return transmit;
++        }
++    }
++
++    void WriteSCR(uint8 value) {
++        SCR = value;
++        if (!(SCR & kTE)) {
++            SSR |= kTDRE | kTEND;
++        }
++    }
++
++    [[nodiscard]] uint64 TransmitCycles() const {
++        const uint64 clockDivider = uint64{1} << (2u * (SMR & 3u));
++        const uint64 dataBits = (SMR & 0x40) ? 7u : 8u;
++        const uint64 bits = (SMR & 0x80) ? dataBits
++                                         : 1u + dataBits + ((SMR & 0x20) ? 1u : 0u) + ((SMR & 0x08) ? 2u : 1u);
++        const uint64 bitCycles = ((SMR & 0x80) ? 8u : 32u) * (uint64{BRR} + 1u) * clockDivider;
++        return bits * bitCycles;
++    }
++
++    bool ReceiveByte(uint8 value) {
++        if (!(SCR & kRE)) {
++            return false;
++        }
++        if (SSR & kRDRF) {
++            SSR |= kORER;
++            return false;
++        }
++        RDR = value;
++        SSR |= kRDRF;
++        return true;
++    }
++
++    bool CanDMATransmit() const {
++        return (SCR & kTE) && (SSR & kTDRE);
++    }
++
++    bool CanDMAReceive() const {
++        return (SCR & kRE) && (SSR & kRDRF);
++    }
++};
++
++} // namespace ymir::sh2
+diff --git a/libs/ymir-core/include/ymir/savestate/savestate_sh2.hpp b/libs/ymir-core/include/ymir/savestate/savestate_sh2.hpp
+index 42ebe91..3239bf7 100644
+--- a/libs/ymir-core/include/ymir/savestate/savestate_sh2.hpp
++++ b/libs/ymir-core/include/ymir/savestate/savestate_sh2.hpp
+@@ -39,6 +39,20 @@ struct SH2SaveState {
+         uint16 RTCOR;
+     } bsc;
+ 
++    struct SCI {
++        uint8 SMR = 0x00;
++        uint8 BRR = 0xFF;
++        uint8 SCR = 0x00;
++        uint8 TDR = 0xFF;
++        uint8 SSR = 0x84;
++        uint8 RDR = 0x00;
++        uint8 observedStatus = 0x00;
++        uint8 txValue = 0x00;
++        uint64 txCompleteCycle = 0;
++        bool txBusy = false;
++        uint64 rxReadyCycle = 0;
++    } sci;
++
+     struct DMAC {
+         struct Channel {
+             uint32 SAR;
+diff --git a/libs/ymir-core/include/ymir/sys/saturn.hpp b/libs/ymir-core/include/ymir/sys/saturn.hpp
+index 14e526a..f52a4ef 100644
+--- a/libs/ymir-core/include/ymir/sys/saturn.hpp
++++ b/libs/ymir-core/include/ymir/sys/saturn.hpp
+@@ -40,6 +40,17 @@ namespace ymir {
+ ///
+ /// See @ref index for details on how to use the emulator.
+ struct Saturn {
++    struct ResetDiagnostics {
++        uint64 hardResets = 0;
++        uint64 softResets = 0;
++        uint64 smpcSystemResets = 0;
++        uint64 slaveStarts = 0;
++    };
++
++    [[nodiscard]] const ResetDiagnostics &GetResetDiagnostics() const {
++        return m_resetDiagnostics;
++    }
++
+     /// @brief Creates a new Sega Saturn emulator reset to factory state.
+     ///
+     /// The emulator comes with no disc, no peripherals, no cartridge, and a basic IPL ROM that puts the master SH-2
+@@ -212,9 +223,18 @@ struct Saturn {
+     /// - **Debug tracing**: configured with `EnableDebugTracing(bool)`
+     /// - **SH-2 cache emulation**: configured with `EnableSH2CacheEmulation(bool)`
+     void RunFrame() {
++        m_executionYielded = false;
+         (this->*m_runFrameFn)();
+     }
+ 
++    // Host link synchronization only. No callback is installed during ordinary emulation.
++    // A zero budget yields to the frontend without advancing guest time.
++    void SetExecutionBudgetCallback(util::OptionalCallback<uint64(uint64, uint64)> callback) {
++        m_executionBudget = callback;
++        m_hasExecutionBudget = true;
++    }
++    bool ExecutionYielded() const { return m_executionYielded; }
++
+     /// @brief Runs a single master SH-2 instruction using the current settings.
+     ///
+     /// The implementation of the function depends on the following parameters:
+@@ -356,6 +376,9 @@ private:
+ 
+     /// @brief The event scheduler.
+     core::Scheduler m_scheduler;
++    util::OptionalCallback<uint64(uint64, uint64)> m_executionBudget;
++    bool m_hasExecutionBudget = false, m_executionYielded = false;
++    uint64 m_timelineRevision = 0; // deliberately not restored from a save state
+ 
+     /// @brief Advances the SH-1 CPU by the specified number of system (SH-2) cycles.
+     /// Uses and updates spillover and fractional SH-1 cycle counters.
+@@ -456,6 +479,7 @@ private:
+     // TODO: use an abstraction to support reading from real drives as well as disc images
+     media::CDInterface m_cdif;  ///< CD interface containing currently loaded disc
+     media::fs::Filesystem m_fs; ///< Filesystem contained in the disc
++    ResetDiagnostics m_resetDiagnostics;
+ 
+     uint64 m_msh2SpilloverCycles; ///< Master SH-2 execution cycles spilled over between executions
+     uint64 m_ssh2SpilloverCycles; ///< Slave SH-2 execution cycles spilled over between executions
+diff --git a/libs/ymir-core/include/ymir/util/dirty_bitmap.hpp b/libs/ymir-core/include/ymir/util/dirty_bitmap.hpp
+index f4cdda0..dde15e1 100644
+--- a/libs/ymir-core/include/ymir/util/dirty_bitmap.hpp
++++ b/libs/ymir-core/include/ymir/util/dirty_bitmap.hpp
+@@ -139,7 +139,7 @@ struct DirtyBitmap {
+     /// @param[out] outSetCount receives the number of bits set in a row
+     /// @return the offset to the next sequence of set bits, or `numBits` if not found.
+     template <size_t N>
+-        requires(bit::is_power_of_two(N) && N < sizeof(TEntry) * 8u)
++        requires(bit::is_power_of_two(size_t(N)) && N < sizeof(TEntry) * 8u)
+     size_t FindNextGroup(size_t &outSetCount, size_t offset = 0) {
+         static constexpr TEntry kMask = (1ull << N) - 1ull;
+         offset &= ~(N - 1u);
+diff --git a/libs/ymir-core/src/ymir/hw/scu/scu.cpp b/libs/ymir-core/src/ymir/hw/scu/scu.cpp
+index 215a7b3..c70b10b 100644
+--- a/libs/ymir-core/src/ymir/hw/scu/scu.cpp
++++ b/libs/ymir-core/src/ymir/hw/scu/scu.cpp
+@@ -308,6 +308,17 @@ void SCU::TriggerExternalInterrupt0() {
+     }
+ }
+ 
++void SCU::TriggerExternalInterrupt(uint32 index) {
++    if (index >= 16) {
++        return;
++    }
++    const uint32 mask = 1u << index;
++    if (!(m_intrStatus.external & mask) && !(m_abusIntrsPendingAck & mask)) {
++        m_intrStatus.external |= mask;
++        UpdateMasterInterruptLevel();
++    }
++}
++
+ void SCU::AcknowledgeExternalInterrupt() {
+     if (m_pendingIntrLevel > 0) {
+         devlog::trace<grp::intr>("Acknowledging {} interrupt {:X}",
+@@ -579,7 +590,7 @@ FORCE_INLINE void SCU::UpdateMasterInterruptLevel() {
+     }
+ 
+     const uint16 internalBits = m_intrStatus.internal & ~m_intrMask.internal;
+-    const uint16 externalBits = m_intrMask.ABus_ExtIntrs ? m_intrStatus.external : 0u;
++    const uint16 externalBits = m_intrMask.ABus_ExtIntrs ? 0u : m_intrStatus.external;
+     if (internalBits == 0 && externalBits == 0) {
+         return;
+     }
+diff --git a/libs/ymir-core/src/ymir/hw/sh2/sh2.cpp b/libs/ymir-core/src/ymir/hw/sh2/sh2.cpp
+index 1cea63d..da66192 100644
+--- a/libs/ymir-core/src/ymir/hw/sh2/sh2.cpp
++++ b/libs/ymir-core/src/ymir/hw/sh2/sh2.cpp
+@@ -8,6 +8,8 @@
+ 
+ #include <algorithm>
+ #include <cassert>
++#include <cstdio>
++#include <cstdlib>
+ #include <ostream>
+ #include <string>
+ #include <string_view>
+@@ -323,11 +325,22 @@ SH2::SH2(sys::SH2Bus &bus, bool master)
+     : m_bus(bus)
+     , m_logPrefix(master ? "SH2-M" : "SH2-S") {
+ 
++    const char *postmatchTrace = std::getenv("YMIR_XBAND_POSTMATCH_TRACE");
++    m_xbandPostmatchTrace = postmatchTrace && std::string_view(postmatchTrace) == "1";
++    if (m_xbandPostmatchTrace) {
++        std::fprintf(stderr, "XBAND_POSTMATCH_TRACE cpu=%.*s enabled=1 limit=256 registers_only=1 vf_rom_addresses=1\n",
++                     int(m_logPrefix.size()), m_logPrefix.data());
++    }
++
+     BCR1.MASTER = !master;
+     Reset(true);
+ }
+ 
+ void SH2::Reset(bool hard, bool watchdogInitiated) {
++    ++m_sciDiagnostics.resets;
++    if (watchdogInitiated) {
++        ++m_sciDiagnostics.watchdogResets;
++    }
+     // Initial values:
+     // - R0-R14 = undefined
+     // - R15 = ReadLong(0x00000004)  [NOTE: ignores VBR]
+@@ -374,6 +387,8 @@ void SH2::Reset(bool hard, bool watchdogInitiated) {
+     }
+     m_dmacTraced.fill(false);
+ 
++    SCI.Reset();
++
+     WDT.Reset(watchdogInitiated);
+ 
+     SBYCR.u8 = 0x00;
+@@ -395,6 +410,81 @@ void SH2::Reset(bool hard, bool watchdogInitiated) {
+     TraceReset(m_tracer, PC, R[15], watchdogInitiated);
+ }
+ 
++void SH2::SCITransmitByte(uint8 value) {
++    SCI.SSR &= ~(SerialCommunicationInterface::kTDRE | SerialCommunicationInterface::kTEND);
++    SCI.observedStatus &= ~SerialCommunicationInterface::kTDRE;
++    SCI.TDR = value;
++    if (!SCI.txBusy) {
++        // An idle SCI moves TDR into the shift register and makes TDR empty
++        // before the frame finishes on the wire.
++        SCI.txValue = value;
++        SCI.txCompleteCycle = GetCurrentCycleCount() + SCI.TransmitCycles();
++        SCI.txBusy = true;
++        SCI.SSR |= SerialCommunicationInterface::kTDRE;
++    }
++    RecalcInterrupts();
++}
++
++void SH2::AdvanceSCI() {
++    const uint64 now = GetCurrentCycleCount();
++    while (SCI.txBusy && now >= SCI.txCompleteCycle) {
++        m_cbSCITransmit(SCI.txValue);
++        if (!(SCI.SSR & SerialCommunicationInterface::kTDRE)) {
++            // The guest filled TDR during this frame. Continue with the
++            // buffered byte without asserting transmit-end.
++            SCI.txValue = SCI.TDR;
++            SCI.txCompleteCycle += SCI.TransmitCycles();
++            SCI.SSR |= SerialCommunicationInterface::kTDRE;
++        } else {
++            SCI.txBusy = false;
++            SCI.SSR |= SerialCommunicationInterface::kTEND;
++        }
++        RecalcInterrupts();
++    }
++}
++
++bool SH2::SCIReceiveByte(uint8 value) {
++    const bool wasEnabled = SCI.SCR & SerialCommunicationInterface::kRE;
++    const bool wasFull = SCI.SSR & SerialCommunicationInterface::kRDRF;
++    const bool accepted = SCI.ReceiveByte(value);
++    TraceSCI(accepted ? 'A' : 'X', value);
++    if (accepted) {
++        ++m_sciDiagnostics.received;
++        SCI.rxReadyCycle = GetCurrentCycleCount() + SCI.TransmitCycles();
++    } else if (wasEnabled && wasFull) {
++        ++m_sciDiagnostics.receiveOverruns;
++    }
++    if (SCI.SCR & SerialCommunicationInterface::kRE) {
++        RecalcInterrupts();
++    }
++    return accepted;
++}
++
++void SH2::PollSCIReceive() {
++    if (!(SCI.SCR & SerialCommunicationInterface::kRE)) {
++        DiscardSCIReceive();
++        return;
++    }
++    if ((SCI.SSR & SerialCommunicationInterface::kRDRF) || GetCurrentCycleCount() < SCI.rxReadyCycle) {
++        return;
++    }
++    if (const auto value = m_cbSCIReceive()) {
++        SCIReceiveByte(*value);
++    }
++}
++
++void SH2::DiscardSCIReceive() {
++    // A disabled SCI does not retain bytes seen on the physical RxD pin. Drop
++    // bytes that arrived while RE was clear instead of replaying them when
++    // the guest later enables reception.
++    for (uint32 i = 0; i < 64 * 1024; ++i) {
++        if (!m_cbSCIReceive()) {
++            break;
++        }
++        ++m_sciDiagnostics.discardedWhileDisabled;
++    }
++}
++
+ void SH2::MapMemory(sys::SH2Bus &bus) {
+     const uint32 addressOffset = !BCR1.MASTER * 0x80'0000;
+ 
+@@ -434,6 +524,7 @@ void SH2::DumpCacheAddressTag(std::ostream &out) const {
+ template <bool debug, bool emulateCache>
+ FLATTEN uint64 SH2::Advance(uint64 cycles, uint64 spilloverCycles) {
+     m_cyclesExecuted = spilloverCycles;
++    AdvanceSCI();
+     AdvanceWDT<false>();
+     AdvanceFRT<false>();
+ 
+@@ -506,6 +597,7 @@ template uint64 SH2::Advance<true, true>(uint64, uint64);
+ template <bool debug, bool emulateCache>
+ FLATTEN uint64 SH2::Step() {
+     m_cyclesExecuted = 0; // so that AdvanceWDT/FRT sync to the scheduler time
++    AdvanceSCI();
+     AdvanceWDT<false>();
+     AdvanceFRT<false>();
+     m_cyclesExecuted = InterpretNext<debug, emulateCache>();
+@@ -560,6 +652,18 @@ void SH2::SaveState(savestate::SH2SaveState &state) const {
+     state.bsc.RTCNT = RTCNT;
+     state.bsc.RTCOR = RTCOR;
+ 
++    state.sci.SMR = SCI.SMR;
++    state.sci.BRR = SCI.BRR;
++    state.sci.SCR = SCI.SCR;
++    state.sci.TDR = SCI.TDR;
++    state.sci.SSR = SCI.SSR;
++    state.sci.RDR = SCI.RDR;
++    state.sci.observedStatus = SCI.observedStatus;
++    state.sci.txValue = SCI.txValue;
++    state.sci.txCompleteCycle = SCI.txCompleteCycle;
++    state.sci.txBusy = SCI.txBusy;
++    state.sci.rxReadyCycle = SCI.rxReadyCycle;
++
+     state.dmac.DMAOR = DMAOR.Read();
+     m_dmaChannels[0].SaveState(state.dmac.channels[0]);
+     m_dmaChannels[1].SaveState(state.dmac.channels[1]);
+@@ -600,6 +704,18 @@ void SH2::LoadState(const savestate::SH2SaveState &state) {
+     RTCNT = state.bsc.RTCNT;
+     RTCOR = state.bsc.RTCOR;
+ 
++    SCI.SMR = state.sci.SMR;
++    SCI.BRR = state.sci.BRR;
++    SCI.SCR = state.sci.SCR;
++    SCI.TDR = state.sci.TDR;
++    SCI.SSR = state.sci.SSR;
++    SCI.RDR = state.sci.RDR;
++    SCI.observedStatus = state.sci.observedStatus;
++    SCI.txValue = state.sci.txValue;
++    SCI.txCompleteCycle = state.sci.txCompleteCycle;
++    SCI.txBusy = state.sci.txBusy;
++    SCI.rxReadyCycle = state.sci.rxReadyCycle;
++
+     DMAOR.Write<true>(state.dmac.DMAOR);
+     m_dmaChannels[0].LoadState(state.dmac.channels[0]);
+     m_dmaChannels[1].LoadState(state.dmac.channels[1]);
+@@ -695,7 +811,9 @@ T SH2::MemRead(uint32 address) {
+         if constexpr (peek) {
+             return m_bus.Peek<T>(address & 0x7FFFFFF);
+         } else {
+-            return m_bus.Read<T>(address & 0x7FFFFFF);
++            const T value = m_bus.Read<T>(address & 0x7FFFFFF);
++            TraceModemAccess(false, address, value, sizeof(T));
++            return value;
+         }
+     case 0b010: // associative purge
+         m_cache.AssociativePurge(address);
+@@ -792,6 +910,7 @@ void SH2::MemWrite(uint32 address, T value) {
+             m_bus.Poke<T>(address & 0x7FFFFFF, value);
+         } else {
+             m_bus.Write<T>(address & 0x7FFFFFF, value);
++            TraceModemAccess(true, address, value, sizeof(T));
+         }
+         break;
+     case 0b010: // associative purge
+@@ -1042,7 +1161,21 @@ FORCE_INLINE_EX uint8 SH2::OnChipRegReadByte(uint32 address) {
+     }
+ 
+     switch (address) {
+-    case 0x04: return 0; // TODO: SCI SSR
++    case 0x00: return SCI.SMR;
++    case 0x01: return SCI.BRR;
++    case 0x02: return SCI.SCR;
++    case 0x03: return SCI.TDR;
++    case 0x04:
++        if constexpr (!peek) {
++            AdvanceSCI();
++            PollSCIReceive();
++        }
++        return SCI.ReadSSR<peek>();
++    case 0x05:
++        if constexpr (!peek) {
++            PollSCIReceive();
++        }
++        return SCI.RDR;
+     case 0x10: return FRT.ReadTIER();
+     case 0x11:
+         if constexpr (!peek) {
+@@ -1314,6 +1447,55 @@ FORCE_INLINE_EX void SH2::OnChipRegWriteByte(uint32 address, uint8 value) {
+     }
+ 
+     switch (address) {
++    case 0x00: TraceSCI('0', value); SCI.SMR = value; break;
++    case 0x01: TraceSCI('1', value); SCI.BRR = value; break;
++    case 0x02:
++        TraceSCI('2', value);
++        AdvanceSCI();
++        if ((SCI.SCR ^ value) & SerialCommunicationInterface::kRE) {
++            if (value & SerialCommunicationInterface::kRE) {
++                ++m_sciDiagnostics.receiverEnabled;
++            } else {
++                ++m_sciDiagnostics.receiverDisabled;
++            }
++        }
++        if (!(SCI.SCR & SerialCommunicationInterface::kRE) && (value & SerialCommunicationInterface::kRE)) {
++            DiscardSCIReceive();
++        }
++        SCI.WriteSCR(value);
++        TraceSCI('v', value);
++        if (!(value & SerialCommunicationInterface::kTE)) {
++            SCI.txBusy = false;
++        } else if constexpr (!poke) {
++            // Software may fill TDR and clear TDRE while transmission is
++            // disabled. Once TE is enabled, an idle shifter must consume that
++            // pending byte; waiting for another TDRE clear would strand it.
++            if (!SCI.txBusy && !(SCI.SSR & SerialCommunicationInterface::kTDRE)) {
++                SCITransmitByte(SCI.TDR);
++            }
++        }
++        if (!(value & SerialCommunicationInterface::kRE)) {
++            SCI.rxReadyCycle = 0;
++        }
++        RecalcInterrupts();
++        break;
++    case 0x03: TraceSCI('3', value); SCI.TDR = value; break;
++    case 0x04: {
++        TraceSCI('4', value);
++        AdvanceSCI();
++        const bool hadReceiveFlag = SCI.SSR & SerialCommunicationInterface::kRDRF;
++        if (SCI.WriteSSR<poke>(value)) {
++            SCITransmitByte(SCI.TDR);
++        }
++        TraceSCI('w', value);
++        if (hadReceiveFlag && !(SCI.SSR & SerialCommunicationInterface::kRDRF)) {
++            ++m_sciDiagnostics.receiveFlagCleared;
++            TraceSCI('C', SCI.RDR);
++        }
++        RecalcInterrupts();
++        break;
++    }
++    case 0x05: break; // RDR is read-only
+     case 0x10:
+         FRT.WriteTIER(value);
+         if (FRT.FTCSR.ICF && FRT.TIER.ICIE) {
+@@ -1369,34 +1551,6 @@ FORCE_INLINE_EX void SH2::OnChipRegWriteByte(uint32 address, uint8 value) {
+         INTC.SetLevel(SCI_RXI, sciIntrLevel);
+         INTC.SetLevel(SCI_TXI, sciIntrLevel);
+         INTC.SetLevel(SCI_TEI, sciIntrLevel);
+-        // TODO: SCI ERI, RXI, TXI, TEI
+-        // if (sciIntrLevel > 0) {
+-        //     /*if (...) {
+-        //         RaiseInterrupt(InterruptSource::SCI_ERI);
+-        //     } else {
+-        //         LowerInterrupt(InterruptSource::SCI_ERI);
+-        //     }*/
+-        //     /*if (...) {
+-        //         RaiseInterrupt(InterruptSource::SCI_RXI);
+-        //     } else {
+-        //         LowerInterrupt(InterruptSource::SCI_RXI);
+-        //     }*/
+-        //     /*if (...) {
+-        //         RaiseInterrupt(InterruptSource::SCI_TXI);
+-        //     } else {
+-        //         LowerInterrupt(InterruptSource::SCI_TXI);
+-        //     }*/
+-        //     /*if (...) {
+-        //         RaiseInterrupt(InterruptSource::SCI_TEI);
+-        //     } else {
+-        //         LowerInterrupt(InterruptSource::SCI_TEI);
+-        //     }*/
+-        // } else {
+-        //     LowerInterrupt(InterruptSource::SCI_ERI);
+-        //     LowerInterrupt(InterruptSource::SCI_RXI);
+-        //     LowerInterrupt(InterruptSource::SCI_TXI);
+-        //     LowerInterrupt(InterruptSource::SCI_TEI);
+-        // }
+         if (frtIntrLevel > 0) {
+             if (FRT.FTCSR.ICF && FRT.TIER.ICIE) {
+                 RaiseInterrupt(InterruptSource::FRT_ICI);
+@@ -1412,6 +1566,7 @@ FORCE_INLINE_EX void SH2::OnChipRegWriteByte(uint32 address, uint8 value) {
+             LowerInterrupt(InterruptSource::FRT_OCI);
+             LowerInterrupt(InterruptSource::FRT_OVI);
+         }
++        RecalcInterrupts();
+         break;
+     }
+     case 0x61: /* IPRB bits 7-0 are all reserved */ break;
+@@ -1775,6 +1930,10 @@ FORCE_INLINE uint64 SH2::GetCurrentCycleCount() const {
+     return *m_currCount + m_cyclesExecuted;
+ }
+ 
++uint64 SH2::GetExecutionCycleCount() const {
++    return GetCurrentCycleCount();
++}
++
+ template <std::integral... Ts>
+ FORCE_INLINE uint64 SH2::WritebackCycles(Ts... regs) {
+     return ((regs == m_wbReg) || ...) ? 1 : 0;
+@@ -1801,8 +1960,16 @@ FORCE_INLINE bool SH2::StepDMAC(uint32 channel) {
+     if (!ch.autoRequest) {
+         switch (ch.resSelect) {
+         case DMAResourceSelect::DREQ: /*TODO*/ return false;
+-        case DMAResourceSelect::RXI: /*TODO*/ return false;
+-        case DMAResourceSelect::TXI: /*TODO*/ return false;
++        case DMAResourceSelect::RXI:
++            if (!SCI.CanDMAReceive()) {
++                return false;
++            }
++            break;
++        case DMAResourceSelect::TXI:
++            if (!SCI.CanDMATransmit()) {
++                return false;
++            }
++            break;
+         case DMAResourceSelect::Reserved: return false;
+         }
+     }
+@@ -1849,6 +2016,19 @@ FORCE_INLINE bool SH2::StepDMAC(uint32 channel) {
+         devlog::trace<grp::dma_xfer>(m_logPrefix, "DMAC{} 8-bit transfer from {:08X} to {:08X} -> {:X}", channel,
+                                      ch.srcAddress, ch.dstAddress, value);
+         MemWriteByte<debug, emulateCache>(ch.dstAddress, value);
++        if (!ch.autoRequest && ch.resSelect == DMAResourceSelect::RXI && ch.srcAddress == 0xFFFF'FE05u) {
++            ++m_sciDiagnostics.dmaReceiveTransfers;
++            SCI.SSR &= ~SerialCommunicationInterface::kRDRF;
++            SCI.observedStatus &= ~SerialCommunicationInterface::kRDRF;
++            TraceSCI('D', value);
++            RecalcInterrupts();
++        }
++        // A TXI module request clears TDRE as part of the DMA write to TDR.
++        if (!ch.autoRequest && ch.resSelect == DMAResourceSelect::TXI &&
++            ch.dstAddress == 0xFFFF'FE03u) {
++            ++m_sciDiagnostics.dmaTransmitTransfers;
++            SCITransmitByte(value);
++        }
+         TraceDMAXferData<debug>(m_tracer, channel, ch.srcAddress, ch.dstAddress, value, xferSize);
+         break;
+     }
+@@ -1922,6 +2102,8 @@ FORCE_INLINE bool SH2::StepDMAC(uint32 channel) {
+ 
+ template <bool debug, bool emulateCache>
+ FORCE_INLINE void SH2::AdvanceDMA(uint64 cycles) {
++    AdvanceSCI();
++    PollSCIReceive();
+     for (uint32 i = 0; i < 2; ++i) {
+         // HACK: run full transfers to fix sprite glitches in Golden Axe - The Duel
+         while (StepDMAC<debug, emulateCache>(i)) {
+@@ -2053,12 +2235,19 @@ void SH2::RecalcInterrupts() {
+     // TODO: BSC REF CMI
+     // RaiseInterruptIf(InterruptSource::BSC_REF_CMI, levelWDT_BSC, [this] { return ...; });
+ 
+-    // TODO: SCI ERI, RXI, TXI, TEI
+-    // const uint8 levelSCI = INTC.GetLevel(InterruptSource::SCI_ERI);
+-    // RaiseInterruptIf(InterruptSource::SCI_ERI, levelSCI, [this] { return ...; });
+-    // RaiseInterruptIf(InterruptSource::SCI_RXI, levelSCI, [this] { return ...; });
+-    // RaiseInterruptIf(InterruptSource::SCI_TXI, levelSCI, [this] { return ...; });
+-    // RaiseInterruptIf(InterruptSource::SCI_TEI, levelSCI, [this] { return ...; });
++    const uint8 levelSCI = INTC.GetLevel(InterruptSource::SCI_ERI);
++    RaiseInterruptIf(InterruptSource::SCI_ERI, levelSCI, [this] {
++        return (SCI.SCR & SerialCommunicationInterface::kRIE) && (SCI.SSR & 0x38);
++    });
++    RaiseInterruptIf(InterruptSource::SCI_RXI, levelSCI, [this] {
++        return (SCI.SCR & SerialCommunicationInterface::kRIE) && (SCI.SSR & SerialCommunicationInterface::kRDRF);
++    });
++    RaiseInterruptIf(InterruptSource::SCI_TXI, levelSCI, [this] {
++        return (SCI.SCR & SerialCommunicationInterface::kTIE) && (SCI.SSR & SerialCommunicationInterface::kTDRE);
++    });
++    RaiseInterruptIf(InterruptSource::SCI_TEI, levelSCI, [this] {
++        return (SCI.SCR & SerialCommunicationInterface::kTEIE) && (SCI.SSR & SerialCommunicationInterface::kTEND);
++    });
+ 
+     // Free-running timer interrupts
+     const uint8 levelFRT = INTC.GetLevel(InterruptSource::FRT_ICI);
+@@ -2194,11 +2383,45 @@ FORCE_INLINE uint64 SH2::EnterException(uint8 vectorNumber) {
+ // -----------------------------------------------------------------------------
+ // Instruction interpreters
+ 
++void SH2::TraceXBANDPostmatch(uint32 pc) {
++    if (m_xbandPostmatchTraceLines >= 256) return;
++    const char *checkpoint = nullptr;
++    switch (pc) {
++    case 0x06006110:
++        if (R[4] == 0x00460010) checkpoint = "result_dispatch";
++        break;
++    case 0x0609C08C: checkpoint = "result_entry"; break;
++    case 0x0609C0AA: checkpoint = "ranking_lookup_return"; break;
++    case 0x0609C0C8: checkpoint = "ranking_record_return"; break;
++    case 0x0609C0F4: checkpoint = "result_error"; break;
++    case 0x0609C150: checkpoint = "award_text_return"; break;
++    case 0x0609C158: checkpoint = "award_number_return"; break;
++    case 0x0609C16E: checkpoint = "compare_scores"; break;
++    case 0x0609C176: checkpoint = "winner_update"; break;
++    case 0x0609C2D6: checkpoint = "ranking_store"; break;
++    case 0x0609C2E6: checkpoint = "result_exit"; break;
++    default: break;
++    }
++    if (!checkpoint) return;
++    ++m_xbandPostmatchTraceLines;
++    std::fprintf(stderr,
++        "XBAND_POSTMATCH_TRACE cpu=%.*s event=%s pc=%08X pr=%08X r0=%08X r1=%08X r4=%08X r5=%08X r6=%08X r7=%08X r8=%08X r9=%08X r10=%08X line=%u\n",
++        int(m_logPrefix.size()), m_logPrefix.data(), checkpoint, pc, PR, R[0], R[1], R[4], R[5], R[6], R[7], R[8], R[9], R[10], m_xbandPostmatchTraceLines);
++    if (m_xbandPostmatchTraceLines == 256) {
++        m_xbandPostmatchTrace = false;
++        std::fprintf(stderr, "XBAND_POSTMATCH_TRACE cpu=%.*s limit_reached=1\n", int(m_logPrefix.size()), m_logPrefix.data());
++    }
++}
++
+ template <bool debug, bool emulateCache>
+ FORCE_INLINE_EX uint64 SH2::InterpretNext() {
+     if (std::bit_cast<uint16>(m_intrFlags) == kIntrFlagsPendingAllowed) [[unlikely]] {
+         // Service interrupt
+         const uint8 vecNum = INTC.GetVector(INTC.pending.source);
++        if (INTC.pending.source == InterruptSource::SCI_RXI ||
++            INTC.pending.source == InterruptSource::SCI_ERI) {
++            TraceSCI(INTC.pending.source == InterruptSource::SCI_RXI ? 'I' : 'E', vecNum);
++        }
+         TraceInterrupt<debug>(m_tracer, vecNum, INTC.pending.level, INTC.pending.source, PC);
+         devlog::trace<grp::intr>(m_logPrefix, "[PC = {:08X}] Handling interrupt level {:02X}, vector number {:02X}", PC,
+                                  INTC.pending.level, vecNum);
+@@ -2228,6 +2451,7 @@ FORCE_INLINE_EX uint64 SH2::InterpretNext() {
+ 
+     const uint32 pc = PC;
+     const uint16 instr = FetchInstruction<emulateCache>(pc);
++    if (m_xbandPostmatchTrace) [[unlikely]] TraceXBANDPostmatch(pc);
+     TraceExecuteInstruction<debug>(m_tracer, pc, instr, m_delaySlot);
+ 
+     const OpcodeType opcode = DecodeTable::s_instance.opcodes[m_delaySlot][instr];
+diff --git a/libs/ymir-core/src/ymir/sys/saturn.cpp b/libs/ymir-core/src/ymir/sys/saturn.cpp
+index 6c63bf4..9fb657a 100644
+--- a/libs/ymir-core/src/ymir/sys/saturn.cpp
++++ b/libs/ymir-core/src/ymir/sys/saturn.cpp
+@@ -169,6 +169,12 @@ Saturn::Saturn()
+ }
+ 
+ void Saturn::Reset(bool hard) {
++    ++m_timelineRevision;
++    if (hard) {
++        ++m_resetDiagnostics.hardResets;
++    } else {
++        ++m_resetDiagnostics.softResets;
++    }
+     m_system.clockSpeed = sys::ClockSpeed::_320;
+     m_system.UpdateClockRatios();
+ 
+@@ -439,6 +445,7 @@ bool Saturn::LoadState(const savestate::SaveState &state, bool skipROMChecks) {
+     configuration.cdblock.useLLE = state.cdblockLLE;
+ 
+     m_scheduler.LoadState(state.scheduler);
++    ++m_timelineRevision;
+     m_system.LoadState(state.system);
+     mem.LoadState(state.system);
+     slaveSH2Enabled = state.system.slaveSH2Enabled;
+@@ -513,7 +520,15 @@ template <bool debug, bool enableSH2Cache, bool cdblockLLE>
+ bool Saturn::Run() {
+     static constexpr uint64 kSH2SyncMaxStep = 32;
+ 
+-    const uint64 cycles = static_config::max_timing_granularity ? 1 : std::max<sint64>(m_scheduler.RemainingCount(), 0);
++    uint64 cycles = static_config::max_timing_granularity ? 1 : std::max<sint64>(m_scheduler.RemainingCount(), 0);
++    if (m_hasExecutionBudget) {
++        const uint64 budget = m_executionBudget(m_scheduler.CurrentCount(), m_timelineRevision);
++        if (budget == 0) {
++            m_executionYielded = true;
++            return false;
++        }
++        cycles = std::min(cycles, budget);
++    }
+ 
+     uint64 execCycles;
+     if (SCU.IsDMAActive()) {
+@@ -876,6 +891,7 @@ void Saturn::SMPCOperations::RaiseNMI() {
+ 
+ void Saturn::SMPCOperations::EnableAndResetSlaveSH2() {
+     if (!m_saturn.slaveSH2Enabled) {
++        ++m_saturn.m_resetDiagnostics.slaveStarts;
+         m_saturn.slaveSH2Enabled = true;
+         m_saturn.slaveSH2.Reset(true);
+     }
+@@ -894,6 +910,7 @@ void Saturn::SMPCOperations::DisableM68K() {
+ }
+ 
+ void Saturn::SMPCOperations::SoftResetSystem() {
++    ++m_saturn.m_resetDiagnostics.smpcSystemResets;
+     m_saturn.Reset(false);
+ }
+ 

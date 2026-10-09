@@ -18,6 +18,18 @@ $taskMapping=@{
     'docs/images/system-architecture.svg'='docs/images/system-architecture.svg'
     'docs/BATTLE-CABLE-SERIAL-SPEC.md'='docs/BATTLE-CABLE-SERIAL-SPEC.md'
     'docs/LICENSE-nlohmann-json.txt'='docs/LICENSE-nlohmann-json.txt'
+    'integration/ymir/README.md'='integration/ymir/README.md'
+    'integration/ymir/VERIFICATION.md'='integration/ymir/VERIFICATION.md'
+    'integration/ymir/ymir-9a237ea-serial-xband.patch'='integration/ymir/ymir-9a237ea-serial-xband.patch'
+    'integration/ymir/apply-integration.ps1'='integration/ymir/apply-integration.ps1'
+    'integration/ymir/build-ymir.ps1'='integration/ymir/build-ymir.ps1'
+    'integration/ymir/LICENSE-GPL-3.0.txt'='integration/ymir/LICENSE-GPL-3.0.txt'
+}
+foreach($taskComponent in Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot 'components/xband') -File -Recurse){
+    if($taskComponent.Extension -notin @('.hpp','.cpp','.md') -and $taskComponent.Name -ne 'CMakeLists.txt'){continue}
+    $taskComponentRelative=$taskComponent.FullName.Substring($PSScriptRoot.Length+1).Replace('\','/')
+    if($taskComponentRelative -notmatch '^components/xband/(include/|adapters/|README\.md$)'){continue}
+    $taskMapping[$taskComponentRelative]=$taskComponentRelative
 }
 foreach($taskInput in $taskMapping.Keys){if(-not(Test-Path -LiteralPath (Join-Path $PSScriptRoot $taskInput) -PathType Leaf)){throw ('Missing package input: '+$taskInput)}}
 foreach($taskInput in $taskMapping.Keys){$taskTarget=Join-Path $taskStage $taskMapping[$taskInput];New-Item -ItemType Directory -Path (Split-Path $taskTarget) -Force | Out-Null;Copy-Item -LiteralPath (Join-Path $PSScriptRoot $taskInput) -Destination $taskTarget}

@@ -1,0 +1,2 @@
+# Preserve unified-diff context lines, including their required leading space.
+integration/ymir/*.patch -text whitespace=-blank-at-eol,-blank-at-eof
