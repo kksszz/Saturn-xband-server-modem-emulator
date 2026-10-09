@@ -95,9 +95,9 @@ public:
         if(changed)commit(next);
         if(!created&&hash.empty())return;
         context["event"]=event;context["points_delta"]=delta;context["points_total"]=total;
-        context["point_status"]="サーバー保存済み・ROM反映未確認";
+        context["point_status"]="サーバー保存済み・ゲームDISC(ROM)反映未確認";
         if(!hash.empty()&&!audit.contains("points_delta"))context["point_status"]="結果の照合未完了・加算なし";
-        context["detail"]="ユーザー・ゲーム別のサーバー累積。初期値0。旧テスト値・開始前の結果は加算しません。ROMへの更新応答を準備しますが保存完了通知ではありません。";
+        context["detail"]="ユーザー・ゲーム別のサーバー累積。初期値0。旧テスト値・開始前の結果は加算しません。ゲームDISC(ROM)への更新応答を準備しますが保存完了通知ではありません。";
         if(!hash.empty())context["report_fingerprint"]=hash;
         if(!audit.is_null())for(const char* field:{"configured_points","configured_win_points","configured_lose_points","award_source_id","result_outcome","local_result","remote_result","match_connection_id","match_generation","attribution_version"})if(audit.contains(field))context[field]=audit[field];
         if(!history.append(std::move(context)))throw std::runtime_error("Point ledger committed but history unavailable; preserve ledger");

@@ -15,8 +15,8 @@ class CardDebitTrialWindow {
         auto text=L"Session: "+std::to_wstring(row.session)+L" / "+wide(row.phase)+
             (row.pending?L" / command pending":L"")+L"\n要求度数: "+std::to_wstring(row.amount)+
             L" / 接続時の報告値: "+(row.reported?std::to_wstring(*row.reported):L"未取得")+
-            L"\nROMの消費実績返信: "+(row.result?std::to_wstring(*row.result):L"未確認")+
-            L"\n消費後のROM報告残度数: "+(row.remaining?std::to_wstring(*row.remaining):L"未確認")+
+            L"\nゲームDISC(ROM)の消費実績返信: "+(row.result?std::to_wstring(*row.result):L"未確認")+
+            L"\n消費後のゲームDISC(ROM)報告残度数: "+(row.remaining?std::to_wstring(*row.remaining):L"未確認")+
             L"\n"+wide(row.detail)+L"\n前回: "+wide(row.last);
         SetWindowTextW(status,text.c_str());
         EnableWindow(GetDlgItem(window,4),!row.pending&&(!row.connected||row.phase=="Idle"));

@@ -111,7 +111,7 @@ class XbandDashboard {
         CreateWindowW(L"BUTTON",L"\u89e3\u6790\u30c7\u30fc\u30bf\u5207\u66ff",WS_CHILD|WS_VISIBLE|WS_TABSTOP,342,12,160,30,mailWindow,reinterpret_cast<HMENU>(INT_PTR(983)),c.hInstance,nullptr);
         CreateWindowW(L"BUTTON",L"センター配信メール...",WS_CHILD|WS_VISIBLE|WS_TABSTOP,520,12,180,30,mailWindow,reinterpret_cast<HMENU>(INT_PTR(984)),c.hInstance,nullptr);
         mailSummary=CreateWindowW(L"STATIC",L"",WS_CHILD|WS_VISIBLE,720,18,450,24,mailWindow,nullptr,c.hInstance,nullptr);
-        CreateWindowW(L"STATIC",L"\u300c\u5fdc\u7b54\u3078\u683c\u7d0d\u300d\u306fROM\u306e\u53d7\u4fe1\u5b8c\u4e86\u3092\u610f\u5473\u3057\u307e\u305b\u3093\u3002\u518d\u6295\u7a3f\u306f\u5225\u5c65\u6b74\u3068\u3057\u3066\u8a18\u9332\u3055\u308c\u307e\u3059\u3002",WS_CHILD|WS_VISIBLE,12,55,1180,28,mailWindow,nullptr,c.hInstance,nullptr);
+        CreateWindowW(L"STATIC",L"\u300c\u5fdc\u7b54\u3078\u683c\u7d0d\u300d\u306fゲームDISC(ROM)\u306e\u53d7\u4fe1\u5b8c\u4e86\u3092\u610f\u5473\u3057\u307e\u305b\u3093\u3002\u518d\u6295\u7a3f\u306f\u5225\u5c65\u6b74\u3068\u3057\u3066\u8a18\u9332\u3055\u308c\u307e\u3059\u3002",WS_CHILD|WS_VISIBLE,12,55,1180,28,mailWindow,nullptr,c.hInstance,nullptr);
         mailList=CreateWindowW(WC_LISTVIEWW,L"",WS_CHILD|WS_VISIBLE|WS_TABSTOP|WS_BORDER|LVS_REPORT|LVS_SINGLESEL|LVS_SHOWSELALWAYS,12,92,1200,430,mailWindow,nullptr,c.hInstance,nullptr);
         SendMessageW(mailList,LVM_SETEXTENDEDLISTVIEWSTYLE,0,LVS_EX_FULLROWSELECT|LVS_EX_GRIDLINES|LVS_EX_DOUBLEBUFFER);
         const wchar_t* labels[]={L"ID",L"\u53d7\u4ed8\u65e5\u6642 (JST)",L"\u9001\u4fe1\u8005",L"\u9001\u4fe1\u5143\u96fb\u8a71",L"\u67a0",L"\u5b9b\u5148",L"\u4ef6\u540d",L"\u72b6\u614b"};
@@ -165,7 +165,7 @@ class XbandDashboard {
         auto control=[&](const wchar_t* cls,const wchar_t* label,DWORD style,int x,int y,int width,int height,int id){
             const auto h=CreateWindowW(cls,label,WS_CHILD|WS_VISIBLE|style,x,y,width,height,waitWindow,reinterpret_cast<HMENU>(INT_PTR(id)),c.hInstance,nullptr);
             SendMessageW(h,WM_SETFONT,reinterpret_cast<WPARAM>(GetStockObject(DEFAULT_GUI_FONT)),TRUE);return h;};
-        control(L"STATIC",L"全電話番号・4ユーザー・全ゲーム共通の設定です。\nROMで選んだ「みじかい／ふつう／ながい」に対応する時間を指定します。",0,18,18,520,42,0);
+        control(L"STATIC",L"全電話番号・4ユーザー・全ゲーム共通の設定です。\nゲームDISC(ROM)で選んだ「みじかい／ふつう／ながい」に対応する時間を指定します。",0,18,18,520,42,0);
         const wchar_t* labels[]{L"みじかい",L"ふつう",L"ながい"};
         for(unsigned i=0;i<3;++i){const int y=78+int(i)*46;
             control(L"STATIC",labels[i],0,18,y+5,120,24,0);
@@ -229,7 +229,7 @@ class XbandDashboard {
             text+=L"\n"+diagnostic::rankingWide(lines[0])+L" ／ "+diagnostic::rankingWide(lines[1]);
             text+=L"\n制限は保存直後から適用。接続済みの対戦は中断しません。";
         }else text+=L"　時間帯制限 無効\n表示を設定しても、接続時間の制限は行いません。";
-        text+=L"\nROMの表示は次の対戦接続後、使用状況を開き直すと更新されます。";
+        text+=L"\nゲームDISC(ROM)の表示は次の対戦接続後、使用状況を開き直すと更新されます。";
         SetWindowTextW(usageMessage,text.c_str());
     }
     static LRESULT CALLBACK usageProc(HWND w,UINT m,WPARAM a,LPARAM b){
@@ -284,7 +284,7 @@ class XbandDashboard {
         for(const auto& [phone,area]:usageSettings->snapshot()){auto w=diagnostic::rankingWide(phone);SendMessageW(usagePhone,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(w.c_str()));}
         control(L"STATIC",L"対戦エリア設定（地域による相手の絞り込みは未実装）",0,18,86,560,24,0);
         usageSelector=control(L"COMBOBOX",L"",CBS_DROPDOWNLIST|WS_TABSTOP,18,112,360,160,951);
-        for(const auto* label:{L"上書きしない（保存済みの設定は戻りません）",L"同一局番内に固定（操作不可）",L"全国に固定（操作不可）",L"ROMで任意選択（同一局番内／全国）"})SendMessageW(usageSelector,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(label));
+        for(const auto* label:{L"上書きしない（保存済みの設定は戻りません）",L"同一局番内に固定（操作不可）",L"全国に固定（操作不可）",L"ゲームDISC(ROM)で任意選択（同一局番内／全国）"})SendMessageW(usageSelector,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(label));
         SendMessageW(usageSelector,CB_SETCURSEL,0,0);
         control(L"STATIC",L"プレー時間の表示（文言だけでは接続を制限しません）",0,18,160,560,24,0);
         usagePlayMode=control(L"COMBOBOX",L"",CBS_DROPDOWNLIST|WS_TABSTOP,18,188,360,160,956);
@@ -329,7 +329,7 @@ class XbandDashboard {
         SetWindowTextW(rankingAwardValue,std::to_wstring(row.winPoints<0?1:row.winPoints).c_str());
         EnableWindow(rankingAwardValue,row.winPoints>=0);
         SetWindowTextW(rankingLoseValue,std::to_wstring(row.losePoints).c_str());EnableWindow(rankingLoseValue,row.winPoints>=0);
-        SetWindowTextW(rankingMessage,L"勝者・敗者それぞれ0～999ポイント。ゲーム別、全番号・4ユーザー共通。\n結果報告後に集計し、次の接続で累積をROMへ配信。引き分けは0。\n対戦前のポイント表示は勝者の値。当時の配点を再現する設定ではありません。\n設定変更は次の対戦から。上書きなしでは両者ともサーバー加算なし。");
+        SetWindowTextW(rankingMessage,L"勝者・敗者それぞれ0～999ポイント。ゲーム別、全番号・4ユーザー共通。\n結果報告後に集計し、次の接続で累積をゲームDISC(ROM)へ配信。引き分けは0。\n対戦前のポイント表示は勝者の値。当時の配点を再現する設定ではありません。\n設定変更は次の対戦から。上書きなしでは両者ともサーバー加算なし。");
     }
     void saveRanking(){try{
         const auto index=SendMessageW(rankingSelector,CB_GETCURSEL,0,0);

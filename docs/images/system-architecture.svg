@@ -36,7 +36,7 @@
     <text x="720" y="535" fill="#435b74" font-size="23" font-weight="700">YMIR等のエミュレーター</text>
     <text x="240" y="567" fill="#52677f" font-size="16">左端末：本体は対象外・別途組み込み</text>
     <text x="720" y="567" fill="#52677f" font-size="16">右端末：本体は対象外・別途組み込み</text>
-    <text x="480" y="628" fill="#52677f" font-size="16">接続モジュールは本体へ組み込む一部分です。本体・ROM・BIOSは同梱しません。</text>
+    <text x="480" y="628" fill="#52677f" font-size="16">接続モジュールは本体へ組み込む一部分です。本体・ゲームDISC(ROM)・BIOSは同梱しません。</text>
   </g>
   <g fill="none" stroke="#52677f" stroke-width="3" marker-start="url(#arrow)" marker-end="url(#arrow)">
     <path d="M 380 158 L 240 236"/>

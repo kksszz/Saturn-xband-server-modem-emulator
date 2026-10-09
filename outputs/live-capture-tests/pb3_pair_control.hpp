@@ -109,7 +109,7 @@ struct PB3PairControl {
             record(side,"matched","Match route assigned; peer carrier is not established yet");
         }
         if(d.result==xband::StandbyRegistration::Result::receiver&&priorTicket!=d.ticket)
-            record(side,"standby",target.empty()?std::string{}:"指名先を保持してROMで待機。期限終了時の案内はROM既存の通知0062。独自通知は送信しません。");
+            record(side,"standby",target.empty()?std::string{}:"指名先を保持してゲームDISC(ROM)で待機。期限終了時の案内はゲームDISC(ROM)既存の通知0062。独自通知は送信しません。");
         return d;
     }
     std::array<bool,2> closedAck{};

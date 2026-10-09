@@ -141,8 +141,8 @@ class PB3Service final:public xband::ServiceEndpoint {
         if(!activity||!activityRequested)return;
         auto row=activityContext;row["side"]=side;row["event"]=event;row["configured_points"]=configured;
         if(delta)row["points_delta"]=*delta;if(total)row["points_total"]=*total;
-        row["point_status"]=total?"サーバー台帳記録":"ROM加算未確認";
-        row["detail"]=total?"VF専用サーバー台帳の結果。ROMでの加算確認ではありません。":"対戦前の付与値を応答に組み込みました。送信完了・対戦完了・ROM加算の証明ではありません。";
+        row["point_status"]=total?"サーバー台帳記録":"ゲームDISC(ROM)加算未確認";
+        row["detail"]=total?"VF専用サーバー台帳の結果。ゲームDISC(ROM)での加算確認ではありません。":"対戦前の付与値を応答に組み込みました。送信完了・対戦完了・ゲームDISC(ROM)加算の証明ではありません。";
         activity->append(std::move(row));
     }
     void recordActivity(const char* event,const std::string& detail={}){
@@ -534,7 +534,7 @@ public:
                 // Wire and both policies come from one immutable settings snapshot.
                 auto row=activityContext;row["side"]=side;row["event"]="points_prepared";
                 row["configured_points"]=award.winPoints;row["configured_win_points"]=award.winPoints;row["configured_lose_points"]=award.losePoints;
-                row["point_status"]=award.winPoints<0?"サーバー付与なし":"結果待ち・ROM加算未確認";
+                row["point_status"]=award.winPoints<0?"サーバー付与なし":"結果待ち・ゲームDISC(ROM)加算未確認";
                 row["detail"]=award.winPoints<0?"当該対戦はサーバー付与なし。以前の付与設定を今回の結果に使わないため無効設定を記録。00B4/00B5の上書きはしません。":"勝者・敗者の付与設定を保存。対戦前の00B4/00B5表示は勝者の値。敗者分を含む累積は結果報告後に25で配信。対戦完了の証明ではありません。";
                 activity->append(std::move(row));awardRecorded=true;
             }

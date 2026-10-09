@@ -20,7 +20,7 @@
 
 ## 独立部品のAPI
 
-`include/xband/mail_profile_offers.hpp` はC++20標準ヘッダーだけの部品。Ymir、Windows、GUI、ネットワーク、ROM上の形式に依存しない。
+`include/xband/mail_profile_offers.hpp` はC++20標準ヘッダーだけの部品。Ymir、Windows、GUI、ネットワーク、ゲームDISC(ROM)上の形式に依存しない。
 
 ```cpp
 xband::MailProfileOffers offers; // 同じ保管ストア・実行範囲で共有
@@ -35,7 +35,7 @@ const bool accepted = offers.offerBatch(currentProfile, preparedCustodyIds);
 
 現在の保持報告を照合する前に今回の新着候補を提示表へ登録してはいけない。新着の番号を報告しただけで、まだ提示していないメールを除外できてしまうため、上記の順番を守る。
 
-ROMのword変換は診断アダプター `diagnostic_mail_inventory.hpp` が担当する。移植先の受信形式が違っても、対応する検証済み保管ID一覧を作れば独立部品は再利用できる。1つの提示表を別の保管ストアへ使い回してはいけない。
+ゲームDISC(ROM)のword変換は診断アダプター `diagnostic_mail_inventory.hpp` が担当する。移植先の受信形式が違っても、対応する検証済み保管ID一覧を作れば独立部品は再利用できる。1つの提示表を別の保管ストアへ使い回してはいけない。
 
 ## 設定と寿命
 

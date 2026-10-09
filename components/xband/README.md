@@ -25,7 +25,7 @@ A DIFFERENT, default-off mixed-profile clear experiment requires a fresh owned
 snapshot file and successful whole-request commit before emitting the observed
 all-outbox control. It is restricted to exactly the measured player0/3 mixed
 request, not individual clear or production delivery acknowledgement. The
-ordinary profile/inventory experiments still never clear. Persistence and ROM
+ordinary profile/inventory experiments still never clear. Persistence and ゲームDISC(ROM)
 control remain separate diagnostic adapters; Ymir core is unchanged. See
 `MAIL-PROFILE-BATCH-CLEAR.md`.
 
@@ -946,6 +946,6 @@ No socket has been opened or firewall setting changed by this policy change.
 ## Provenance
 
 ServiceEndpoint originated in this workspace's live-capture-tests header; framing
-and standalone tests are newly authored for this project. No ROM, BIOS, card
+and standalone tests are newly authored for this project. No ゲームDISC(ROM), BIOS, card
 ledger, key or real-user data is included. Review source licensing and dependencies
 before distribution; no licensing permission is inferred by this extraction.

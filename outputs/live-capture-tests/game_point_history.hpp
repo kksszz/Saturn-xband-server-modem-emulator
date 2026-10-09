@@ -87,7 +87,7 @@ inline bool recordGamePointResult(ActivityHistory& history,nlohmann::json contex
             const auto award=local>remote?win:local<remote?lose:0;
             context["configured_win_points"]=win;context["configured_lose_points"]=lose;
             context["configured_points"]=award;context["points_delta"]=award;
-            context["point_status"]="サーバー設定による算出・ROM反映未確認";context["award_source_id"]=prepared.at("id");}
+            context["point_status"]="サーバー設定による算出・ゲームDISC(ROM)反映未確認";context["award_source_id"]=prepared.at("id");}
     }
     for(const auto& row:prior)if(row.value("attribution_version",0)==2&&row.value("event",std::string{})=="points_result"&&
         row.value("phone",std::string{})==phone&&row.value("profile",-1)==context.at("profile").get<int>()&&row.value("game",0u)==game&&

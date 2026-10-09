@@ -34,7 +34,7 @@ ProfileNames／ProfileMailbox／ProfileInventoryが必須。旧BATCH_CLEARや旧
 
 試験ラッパーの `-ProfileSubmissionClearExperiment` は結果フォルダに `profile-submission-custody.xbm` を作り、終了時に環境変数を戻す。`submission_clear_experiment` のenabled／prepared／snapshot_committedは直近要求の診断状態であり、ゲーム側の消去完了を表さない。
 
-保管部品・XBMAIL v1形式は共通、Windowsファイル保存は診断アダプター、ROMの要求／返信変換と許可条件はサービスアダプターに置く。Ymir本体・ゲームイメージ・元保存は変更しない。移植先では送信リストの完全性と消去命令の対象範囲を再確認する。
+保管部品・XBMAIL v1形式は共通、Windowsファイル保存は診断アダプター、ゲームDISC(ROM)の要求／返信変換と許可条件はサービスアダプターに置く。Ymir本体・ゲームイメージ・元保存は変更しない。移植先では送信リストの完全性と消去命令の対象範囲を再確認する。
 
 ## 検証
 

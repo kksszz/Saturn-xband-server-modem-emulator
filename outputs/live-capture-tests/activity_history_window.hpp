@@ -15,7 +15,7 @@ inline std::wstring activityLabel(const std::string& event){
         {"credit_notice_sent",L"度数案内・接続終了"},
         {"credit_insufficient",L"残度数不足・案内終了"},
         {"credit_trial_armed",L"度数試験・要求受付"},{"credit_trial_sent",L"度数試験・49送信"},
-        {"credit_trial_result",L"度数試験・ROM実績受信"},{"credit_trial_continued",L"度数試験・手動継続"},
+        {"credit_trial_result",L"度数試験・ゲームDISC(ROM)実績受信"},{"credit_trial_continued",L"度数試験・手動継続"},
         {"credit_trial_insufficient",L"度数試験・不足案内終了"},
         {"credit_trial_uncertain",L"度数試験・結果未確認"},{"credit_trial_interrupted",L"度数試験・接続中断"},
         {"access",L"アクセス受付"},{"standby",L"待機登録"},{"ready",L"着信待機開始"},
@@ -40,7 +40,7 @@ inline std::array<std::wstring,14> activityCells(const nlohmann::json& row){
         const auto ledger=row.value("credit_settlement_state",std::string{});
         status=ledger=="confirmed"?L"精算確定・再送対象外":ledger=="exhausted"?L"部分消費確認・不足終了・再送禁止":ledger=="uncertain"?L"結果不明・再送禁止":
             ledger=="issued"?L"送信済み・結果待ち":ledger=="pending"?L"未精算":
-            row.value("credit_trial_continuation_verified",false)?L"ROM実績一致・台帳状態未記録":L"消費未確認";
+            row.value("credit_trial_continuation_verified",false)?L"ゲームDISC(ROM)実績一致・台帳状態未記録":L"消費未確認";
     }
     if(row.contains("credit_binding_candidates"))status=L"未検証・自動消費なし";
     if(row.value("credit_trial_shortfall",false))status=L"部分消費確認・要求量は未精算・再送禁止";
@@ -61,10 +61,10 @@ inline std::wstring creditTrialDetail(const nlohmann::json& row){
     const std::wstring title=scope=="automatic-match-settlement"?L"対戦分と今回接続の自動精算":scope=="automatic-mail-access"?L"メール接続の自動消費":scope=="reviewed-reset-one-shot"?L"確認済みリセットの一回限り精算":
         scope=="manual-one-shot"?L"手動度数試験":L"度数試験（旧記録・種別未記録）";
     return L"\r\n"+title+((scope=="automatic-mail-access"||scope=="automatic-match-settlement")?L"（明示的に有効化したサーバー方針）":L"（通常の自動課金ではありません）")+L"　セッション: "+value("credit_trial_session")+
-        L"\r\n要求度数: "+value("requested_credits")+L"　ROM消費実績: "+value("consumed_credits")+
+        L"\r\n要求度数: "+value("requested_credits")+L"　ゲームDISC(ROM)消費実績: "+value("consumed_credits")+
         L"\r\n接続時残度数: "+value("credits_before")+L"　消費後残度数: "+value("remaining_credits")+
         L"\r\n精算エピソード: "+(row.contains("credit_episode")?rankingWide(row.at("credit_episode").get<std::string>()):L"未記録")+
-        L"\r\n記録時の台帳状態: "+(row.contains("credit_settlement_state")?rankingWide(row.at("credit_settlement_state").get<std::string>()):L"未記録（ROM実績とは別）");
+        L"\r\n記録時の台帳状態: "+(row.contains("credit_settlement_state")?rankingWide(row.at("credit_settlement_state").get<std::string>()):L"未記録（ゲームDISC(ROM)実績とは別）");
 }
 inline std::wstring creditBindingDetail(const nlohmann::json& row){
     if(!row.contains("credit_binding_candidates"))return L"";

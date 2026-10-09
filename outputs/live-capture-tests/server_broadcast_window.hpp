@@ -55,7 +55,7 @@ public:
         WNDCLASSW c{};c.lpfnWndProc=proc;c.hInstance=GetModuleHandleW(nullptr);c.lpszClassName=L"XBANDServerBroadcast";c.hCursor=LoadCursor(nullptr,IDC_ARROW);c.hbrBackground=reinterpret_cast<HBRUSH>(COLOR_BTNFACE+1);RegisterClassW(&c);
         window=CreateWindowW(c.lpszClassName,L"XBAND | センター配信メール",WS_OVERLAPPED|WS_CAPTION|WS_SYSMENU|WS_MINIMIZEBOX,CW_USEDEFAULT,CW_USEDEFAULT,960,750,owner,nullptr,c.hInstance,this);
         auto control=[&](const wchar_t* cls,const wchar_t* text,DWORD style,int x,int y,int width,int height,int id=0){auto h=CreateWindowW(cls,text,WS_CHILD|WS_VISIBLE|style,x,y,width,height,window,reinterpret_cast<HMENU>(INT_PTR(id)),c.hInstance,nullptr);SendMessageW(h,WM_SETFONT,reinterpret_cast<WPARAM>(GetStockObject(DEFAULT_GUI_FONT)),TRUE);return h;};
-        control(L"STATIC",L"差出人: XBAND / 住所: 東京 / ROM内のXBANDアイコンを使用。接続中に即時プッシュする機能ではありません。",0,18,16,900,24);
+        control(L"STATIC",L"差出人: XBAND / 住所: 東京 / ゲームDISC(ROM)内のXBANDアイコンを使用。接続中に即時プッシュする機能ではありません。",0,18,16,900,24);
         control(L"STATIC",L"配信先",0,18,56,80,24);scope=control(L"COMBOBOX",L"",CBS_DROPDOWNLIST|WS_TABSTOP,110,52,260,150,1101);
         for(auto text:{L"全ユーザー",L"電話番号・ユーザー枠を指定"})SendMessageW(scope,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(text));SendMessageW(scope,CB_SETCURSEL,0,0);
         phone=control(L"EDIT",L"",WS_BORDER|WS_TABSTOP|ES_AUTOHSCROLL,390,52,230,26,1102);SendMessageW(phone,EM_SETLIMITTEXT,24,0);
@@ -66,7 +66,7 @@ public:
         control(L"STATIC",L"件名32 / 本文240バイト以内（EUC-JP、日本語は通常2バイト）。絵文字不可。受信箱満杯ならサーバーに残します。",0,18,266,900,24);
         control(L"BUTTON",L"配信キューへ登録",WS_TABSTOP,110,302,230,32,1105);control(L"BUTTON",L"履歴を更新",WS_TABSTOP,358,302,150,32,1106);
         control(L"BUTTON",L"サンプルメール作成",WS_TABSTOP,526,302,230,32,1110);
-        status=control(L"STATIC",L"登録は永続保存されます。応答への格納後は自動再送しません。ROMの受信・既読完了は未確認です。",0,18,350,900,38);
+        status=control(L"STATIC",L"登録は永続保存されます。応答への格納後は自動再送しません。ゲームDISC(ROM)の受信・既読完了は未確認です。",0,18,350,900,38);
         INITCOMMONCONTROLSEX common{sizeof(common),ICC_LISTVIEW_CLASSES};InitCommonControlsEx(&common);
         list=control(WC_LISTVIEWW,L"",WS_BORDER|WS_TABSTOP|LVS_REPORT|LVS_SINGLESEL|LVS_SHOWSELALWAYS,18,400,900,180,1109);
         SendMessageW(list,LVM_SETEXTENDEDLISTVIEWSTYLE,0,LVS_EX_FULLROWSELECT|LVS_EX_GRIDLINES|LVS_EX_DOUBLEBUFFER);

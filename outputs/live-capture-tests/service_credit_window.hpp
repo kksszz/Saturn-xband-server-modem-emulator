@@ -45,7 +45,7 @@ public:
         auto control=[&](const wchar_t* cls,const wchar_t* label,DWORD style,int x,int y,int width,int height,int id){
             auto h=CreateWindowW(cls,label,WS_CHILD|WS_VISIBLE|style,x,y,width,height,window,reinterpret_cast<HMENU>(INT_PTR(id)),c.hInstance,nullptr);
             SendMessageW(h,WM_SETFONT,reinterpret_cast<WPARAM>(GetStockObject(DEFAULT_GUI_FONT)),TRUE);return h;};
-        control(L"STATIC",L"全電話番号・4ユーザー・全ゲーム共通。XBANDポイントとは別です。\nメールは接続ごとに指定度数をROMへ要求し、実績一致後に自動継続します。",0,18,18,590,44,0);
+        control(L"STATIC",L"全電話番号・4ユーザー・全ゲーム共通。XBANDポイントとは別です。\nメールは接続ごとに指定度数をゲームDISC(ROM)へ要求し、実績一致後に自動継続します。",0,18,18,590,44,0);
         control(L"STATIC",L"メールアクセス時の消費要求",0,18,88,280,24,0);
         control(L"STATIC",L"通常対戦の度数（次の接続で精算）",0,18,130,300,24,0);
         const auto v=settings->snapshot();

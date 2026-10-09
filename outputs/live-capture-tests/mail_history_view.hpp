@@ -40,13 +40,13 @@ inline std::wstring mailHistoryDetail(const nlohmann::json& row,bool raw){
         const auto& inbox=row.at("recipient_mailbox");
         capacity=L"\r\n\u5b9b\u5148\u306e\u76f4\u8fd1\u30a2\u30af\u30bb\u30b9: \u30e6\u30fc\u30b6\u30fc\u67a0 "+std::to_wstring(inbox.at("profile").get<unsigned>()+1)+
             L" / \u53d7\u4fe1\u7bb1\u5bb9\u91cf "+std::to_wstring(inbox.at("capacity").get<size_t>())+
-            L" / ROM\u7533\u544a "+std::to_wstring(inbox.at("reported").get<size_t>())+
+            L" / ゲームDISC(ROM)\u7533\u544a "+std::to_wstring(inbox.at("reported").get<size_t>())+
             L" / \u5fdc\u7b54\u683c\u7d0d "+std::to_wstring(inbox.at("prepared").get<size_t>())+
             L" / \u30b5\u30fc\u30d0\u30fc\u6b8b\u4ef6 "+std::to_wstring(inbox.at("remaining").get<size_t>());
     }
     return L"ID: "+c[0]+L"    \u53d7\u4ed8\u65e5\u6642 (JST): "+c[1]+L"\r\n\u9001\u4fe1\u8005: "+c[2]+L"    \u96fb\u8a71: "+c[3]+L"    \u30e6\u30fc\u30b6\u30fc\u67a0: "+c[4]+
         L"\r\n\u5b9b\u5148: "+c[5]+L"    \u4ef6\u540d: "+c[6]+L"\r\n\u72b6\u614b: "+c[7]+capacity+
-        L"\r\n\r\n\u672c\u6587\uff08ROM\u5f62\u5f0f\u30fb\u672a\u89e3\u8aad\u306e16\u9032\u30c7\u30fc\u30bf\uff09:\r\n"+
+        L"\r\n\r\n\u672c\u6587\uff08ゲームDISC(ROM)\u5f62\u5f0f\u30fb\u672a\u89e3\u8aad\u306e16\u9032\u30c7\u30fc\u30bf\uff09:\r\n"+
         rankingWide(row.at("encoded_body_hex").get<std::string>());
 }
 }
