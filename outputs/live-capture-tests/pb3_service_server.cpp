@@ -1376,7 +1376,6 @@ int main(){try{
 #ifdef XBAND_FRONTEND_SERVER
     XbandDashboard monitor;
     monitor.setServiceCreditSettings(serviceCreditSettings);
-    monitor.setCardDebitTrials(cardDebitTrials);
     monitor.setActivityHistory(activity);
     if(diagnostic::activeGameResults)monitor.setGameResultHistory(diagnostic::activeGameResults->history());
     monitor.setLocalMailJournal(localMailJournal);

@@ -73,6 +73,15 @@ int main(int argc,char**argv){try{
         bool refused=false;try{diagnostic::ServiceCreditSettings badPolicy(invalid);}catch(...){refused=true;}
         if(!refused)throw std::runtime_error("Unsupported policy accepted");
     }
+    if(GetDlgItem(w,4))throw std::runtime_error("Diagnostic card debit button must not appear in normal UI");
+    SendMessageW(w,WM_COMMAND,4,0); // Former diagnostic command has no normal UI route.
+    bool diagnosticOpened=false;
+    EnumThreadWindows(GetCurrentThreadId(),[](HWND candidate,LPARAM state)->BOOL{
+        wchar_t className[64]{};GetClassNameW(candidate,className,64);
+        if(std::wcscmp(className,L"XbandCardDebitTrial")==0)*reinterpret_cast<bool*>(state)=true;
+        return TRUE;
+    },reinterpret_cast<LPARAM>(&diagnosticOpened));
+    if(diagnosticOpened)throw std::runtime_error("Former diagnostic command opened a trial window");
     for(int id:{1,2,3,5,6,7,8,9,10}){RECT r{};GetWindowRect(GetDlgItem(w,id),&r);if(r.right<=r.left||r.bottom<=r.top)throw std::runtime_error("Missing UI geometry");}
     if(argc==2){
         SetWindowTextW(GetDlgItem(w,1),L"1");SetWindowTextW(GetDlgItem(w,2),L"3");SendMessageW(w,WM_COMMAND,3,0);

@@ -521,9 +521,6 @@ public:
         {std::lock_guard lock(mutex);creditWindow.setSettings(std::move(value));}
         if(auto w=hwnd.load())PostMessageW(w,WM_APP+46,0,0);
     }
-    void setCardDebitTrials(std::shared_ptr<diagnostic::CardDebitTrials> value){
-        std::lock_guard lock(mutex);creditWindow.setTrials(std::move(value));
-    }
     void setStandbyWaitSettings(std::shared_ptr<diagnostic::StandbyWaitSettings> value){
         {std::lock_guard lock(mutex);waitSettings=std::move(value);}
         if(auto w=hwnd.load())PostMessageW(w,WM_APP+45,0,0);

@@ -1,18 +1,15 @@
 #pragma once
 #include "service_credit_settings.hpp"
-#include "card_debit_trial_window.hpp"
 #include <string>
 
 namespace diagnostic {
 class ServiceCreditWindow {
     std::shared_ptr<ServiceCreditSettings> settings;
     HWND window=nullptr,message=nullptr;
-    CardDebitTrialWindow trialWindow;
     static LRESULT CALLBACK proc(HWND w,UINT m,WPARAM a,LPARAM b){
         auto s=reinterpret_cast<ServiceCreditWindow*>(GetWindowLongPtrW(w,GWLP_USERDATA));
         if(m==WM_NCCREATE){s=static_cast<ServiceCreditWindow*>(reinterpret_cast<CREATESTRUCTW*>(b)->lpCreateParams);SetWindowLongPtrW(w,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(s));}
         if(!s)return DefWindowProcW(w,m,a,b);
-        if(m==WM_COMMAND&&LOWORD(a)==4){s->trialWindow.open(w);return 0;}
         if(m==WM_COMMAND&&LOWORD(a)==3){
             try{
                 auto value=[&](int id){wchar_t text[32]{};GetWindowTextW(GetDlgItem(w,id),text,32);
@@ -31,7 +28,6 @@ class ServiceCreditWindow {
         return DefWindowProcW(w,m,a,b);
     }
 public:
-    void setTrials(std::shared_ptr<CardDebitTrials> value){trialWindow.setTrials(std::move(value));}
     void setSettings(std::shared_ptr<ServiceCreditSettings> s){settings=std::move(s);}
     HWND handle()const{return window;}
     void open(HWND owner,bool show=true){
@@ -63,7 +59,6 @@ public:
         control(L"STATIC",L"有効なメール料金も加算（標準：4／2）",0,280,352,350,24,8);
         control(L"STATIC",L"全タイトル共通処理。各端末の新しい結果で個別精算（リセット：-608／-609）。\n未分類のエラー・強制再起動は自動精算しません。相手の接続は待ちません。",0,18,398,630,44,9);
         control(L"BUTTON",L"設定を保存",WS_TABSTOP,350,452,180,32,3);
-        control(L"BUTTON",L"仮想カード消費試験...",WS_TABSTOP,18,452,260,32,4);
         message=control(L"STATIC",L"自動消費の有効化は明示操作のみ。相手側の責任は判定しません。\nこの端末の結果が未確認なら、消費・メール送受信・次の対戦を止めます。\n未挿入・不足・消費結果不明では再送・補充しません。",0,18,500,630,60,10);
         if(show)ShowWindow(window,SW_SHOW);
     }
