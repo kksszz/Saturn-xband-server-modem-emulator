@@ -327,6 +327,9 @@ public:
                         "credit_match_waiting","Own fresh result missing or unclassified; peer access is not required; no debit or service");
                 }
                 if(plan.state==diagnostic::LiveMatchCredits::Plan::State::Blocked)throw std::runtime_error("Match credit binding/card/policy unresolved; no automatic consumption");
+                if(plan.state==diagnostic::LiveMatchCredits::Plan::State::Deferred){
+                    recordActivity("credit_match_deferred","Episode="+plan.episode+"; unclaimed match retained for review; ordinary mail and next match allowed");
+                }
                 if(plan.state==diagnostic::LiveMatchCredits::Plan::State::Ready){amount=plan.amount;fixedEpisode=plan.debitKey;automaticMatchEpisode=plan.episode;mailCreditDenied=plan.mailDenied;}
             }
             if(!amount)return mailCreditDenied?prepareCreditDenied():true;
@@ -1430,6 +1433,16 @@ int main(){try{
         if(monitor.isClosed())break;
 #endif
         const auto now=GetTickCount64();
+#if defined(PB3_SERVER_WINDOW) && defined(XBAND_FRONTEND_SERVER) && defined(PB3_PAIR_CONTROL)
+        for(unsigned side=0;side<2;++side){
+            const bool connected=monitor.telephoneLineConnected(side);
+            pair->setTelephoneLine(side,connected);
+            hosts[side]->setAccepting(connected);
+            hosts[side+2]->setAccepting(connected);
+            // Management polling survives OFF to report the line state.
+            // It is not a guest telephone/service connection.
+        }
+#endif
         for(auto &h:hosts)if(!h->step(now))throw std::runtime_error("PB3 host stopped");
         if(profileNames)for(unsigned i=0;i<2;++i){
             const bool connected=hosts[i]->clientCount()!=0;

@@ -11,6 +11,7 @@ inline std::wstring activityLabel(const std::string& event){
         {"credit_service_confirmed",L"度数精算・確定"},{"credit_service_uncertain",L"度数精算・結果不明"},
         {"credit_service_exhausted",L"度数精算・残高不足の部分消費"},
         {"credit_service_blocked",L"度数精算・処理停止"},
+        {"credit_match_deferred",L"対戦精算・保留（サービス継続）"},
         {"credit_match_waiting",L"対戦精算・端末結果の未確認"},{"credit_mail_denied",L"対戦精算後・メール残度数不足"},
         {"credit_notice_sent",L"度数案内・接続終了"},
         {"credit_insufficient",L"残度数不足・案内終了"},

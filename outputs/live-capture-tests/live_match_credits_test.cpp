@@ -141,9 +141,9 @@ int main(){try{
         const auto a=request(0,10,game,mode==3?-610:mode==4?-608:0);
         const auto b=request(1,10,game,mode==3?-611:mode==4?-609:0,mode==5);
         const bool unresolved=mode==0||mode==3;
-        check(m.observeAndPlan(0,a,1,true,d).state==(unresolved?Match::Plan::State::Waiting:Match::Plan::State::Ready));
+        check(m.observeAndPlan(0,a,1,true,d).state==(unresolved?Match::Plan::State::Deferred:Match::Plan::State::Ready));
         if(mode!=1&&mode!=2)check(m.observeAndPlan(1,b,1,true,d).state==
-            (mode==3?Match::Plan::State::Waiting:Match::Plan::State::Ready));
+            (mode==3?Match::Plan::State::Deferred:Match::Plan::State::Ready));
         if(mode==2){auto changed=a;const auto raw=LocalTCPProbe::observedGameResult(a);
             const auto found=std::search(changed.begin(),changed.end(),raw.begin(),raw.end());
             LocalTCPProbe::putLong(changed,size_t(found-changed.begin())+16,1);
@@ -197,7 +197,7 @@ int main(){try{
             if(mode==2)LocalTCPProbe::putLong(r,157,0x10005);
             if(mode==3)r[143]^=1;
             if(mode==4)r[138]=9; // reported scalar contradicts the bit card
-            if(mode<=4)check(m.observeAndPlan(0,r,1,true,d).state==Match::Plan::State::Blocked);
+            if(mode<=4)check(m.observeAndPlan(0,r,1,true,d).state==(mode<=2?Match::Plan::State::Deferred:Match::Plan::State::Blocked));
             else{std::swap(c[0],c[1]);rejects([&]{m.begin(2,c,{true,3,1,1});});}
         }
         check(d.snapshot().empty());++cases;

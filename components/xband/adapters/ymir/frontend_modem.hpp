@@ -11,7 +11,7 @@ namespace xband::ymir_adapter {
 class FrontendModem {
 public:
     struct Config {bool enabled=false,allowLAN=false;int side=0,port=58240;std::string address="127.0.0.1",phone="3336666666";};
-    struct Snapshot {bool enabled=false,carrier=false;unsigned frame=0;uint64_t sent=0,received=0;std::string status="Disabled";bool virtualCardConfigured=false,virtualCardInserted=false;};
+    struct Snapshot {bool enabled=false,carrier=false;unsigned frame=0;uint64_t sent=0,received=0;std::string status="Disabled";bool virtualCardConfigured=false,virtualCardInserted=false;bool telephoneLineConnected=true;};
     FrontendModem();~FrontendModem();
     void attach(ymir::Saturn &saturn);
     // Call during frontend initialization, before emulator thread starts.
@@ -34,6 +34,15 @@ public:
     void frameCompleted();
     uint64_t budget(uint64_t cycle,uint64_t revision)noexcept;
     void reset(const char *reason);
+    // Owner thread: console soft reset ends old calls but keeps the configured
+    // modem present. State restore/rewind must still use reset(), not this API.
+    void softReset();
+    // Hard Reset has the same modem lifecycle: preserve the peripheral's
+    // persistent contents/presence and phone-line switch, discard old calls.
+    void hardReset();
+    // Owner thread: arm deferred carrier cleanup for console Reset button.
+    // Let the guest report/finish first; clean up only after its board re-probe.
+    void consoleResetButton(bool pressed);
     // Emulator owner thread only, between scheduling iterations. Diagnostic
     // raw bytes; never performs mapped reads or changes flash/UART state.
     void dumpFlash(std::ostream &out) const;

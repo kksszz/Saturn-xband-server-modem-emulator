@@ -21,6 +21,20 @@ struct PB3TimeAdmissionDenied final:std::runtime_error {
 struct PB3PairControl {
     std::shared_ptr<xband::LocalMatchRoles> roles=std::make_shared<xband::LocalMatchRoles>();
     std::array<bool,2> joined{},finished{};
+    std::array<bool,2> telephoneLine{true,true}; // Independent of modem power/card; volatile per server session.
+    void setTelephoneLine(unsigned side,bool connected){
+        if(side>1)throw std::invalid_argument("Invalid telephone line side");
+        if(telephoneLine[side]==connected)return;
+        telephoneLine[side]=connected;
+        record(side,connected?"telephone_line_on":"telephone_line_off",
+            connected?"電話線を接続。ゲーム側からの再接続が必要です。":"電話線を切断。モデムとカードは保持します。");
+        if(connected)return;
+        if(state==2&&creditCarrierEnded)creditCarrierEnded();
+        if(state!=0||roles->caller<2){
+            state=0;closing=true;roles->blocked=true;closedAck={};
+        }else abortStandbyService(side);
+        for(auto& q:bytes)q.clear();
+    }
     std::array<bool,2> postMatchServed{}; // One observed post-call terminator per endpoint and generation.
     unsigned state=0; // 0 idle, 1 ringing, 2 connected
     uint64_t generation=1;
@@ -77,7 +91,11 @@ struct PB3PairControl {
         if(side>1)throw std::runtime_error("Invalid standby side");
         enforceAdmission();
         if(matchAdmission&&!matchAdmission(phone))throw PB3TimeAdmissionDenied{};
-        if(!standbyEnabled||!standbyCapable[side]||failed||closing||state!=0||roles->caller<2)
+        // A new service login can race the old carrier-loss acknowledgements.
+        // Wait for generation renewal rather than killing its transport.
+        if(closing&&!failed&&telephoneLine[side]&&standbyEnabled&&standbyCapable[side])
+            return {xband::StandbyRegistration::Result::defer,0};
+        if(!telephoneLine[side]||!standbyEnabled||!standbyCapable[side]||failed||closing||state!=0||roles->caller<2)
             throw std::runtime_error("Standby control boundary not ready");
         // No target registration: complete service as a receiver so the
         // unmodified ROM owns the wait/expiry/notice62 lifecycle. Keep the
@@ -161,7 +179,9 @@ public:
             if(token>pair->generation)throw std::runtime_error("Future session generation");
             if(token<pair->generation)op="poll"; // Delayed previous-match command: never mutate the new match.
         }
-        if(pair->closing&&op!="closed_ack")op="poll";
+        if(pair->closing&&op!="closed_ack"&&used)op="poll";
+        if((!pair->telephoneLine[0]||!pair->telephoneLine[1])&&
+           (op=="dial"||op=="answer"||op=="exchange"||op=="step"))op="poll";
         if(!used){
             if(op!="join")throw std::runtime_error("pair requires join");
             const auto transport=request.value("transport",std::string("lockstep"));
@@ -253,7 +273,7 @@ public:
         }else if(op!="poll"&&op!="join")throw std::runtime_error("unknown pair control operation");
         auto responseValue=nlohmann::json{{"state",pair->state},{"generation",pair->generation},{"transport",pair->asynchronous?"async-v1":"lockstep"},
             {"closed",pair->failed||pair->closing},{"recoverable",!pair->failed},{"caller",pair->roles->caller},{"callee",pair->roles->callee()},{"joined",pair->joined},{"finished",pair->finished},{"grant_end",pair->grantEnd[side]},
-            {"bytes",received}};
+            {"bytes",received},{"telephone_line",pair->telephoneLine}};
         if(pair->standbyEnabled&&pair->standbyCapable[side]){
             const auto& e=pair->standby.entry(side);
             responseValue["standby"]={{"protocol",pair->standbyProtocols[side]},{"ticket",e?e->ticket:0},
@@ -283,7 +303,13 @@ public:
         pair->joined[side]=false;
         pair->standbyCapable[side]=false;
         pair->standbyProtocols[side].clear();
-        if(!idle&&!(pair->finished[0]&&pair->finished[1]))pair->failed=true;
+        if(!idle&&!(pair->finished[0]&&pair->finished[1])){
+            // Transport loss ends only this carrier generation. The absent
+            // endpoint cannot acknowledge it; a fresh join must remain possible.
+            if(!pair->closing){pair->state=0;pair->closing=true;pair->roles->blocked=true;pair->closedAck={};}
+            pair->closedAck[side]=true;
+            if((pair->closedAck[0]||!pair->joined[0])&&(pair->closedAck[1]||!pair->joined[1]))pair->renew();
+        }
         used=false;
     }
     ~PB3PairControlEndpoint(){reset();}

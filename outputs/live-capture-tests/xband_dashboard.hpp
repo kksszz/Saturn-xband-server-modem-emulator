@@ -24,17 +24,21 @@
 #include "peer_byte_text.hpp"
 #include "server_broadcast_window.hpp"
 #include "service_credit_window.hpp"
+#include "connection_view.hpp"
 #ifdef XBAND_DASHBOARD_RENDER_TEST
 #include <gdiplus.h>
 #include <filesystem>
 #include <vector>
 #endif
 
-// Display-only snapshots. No guest input, network I/O or protocol decisions.
+// Snapshots and operator requests. Network changes are applied by the server
+// owner thread, never by this UI thread.
 class XbandDashboard {
     using J=nlohmann::json;
     std::thread worker;std::mutex mutex;J data;
     std::atomic<HWND> hwnd{nullptr};std::atomic<bool> ready{false},closed{false};
+    std::array<std::atomic<bool>,2> telephoneLine{true,true};
+    std::array<xband::monitor::CallTimer,2> callTimers;
     std::array<uint64_t,2> prior{},rate{};uint64_t last=0;
     std::deque<std::wstring> events;std::string previousState;
     std::shared_ptr<diagnostic::GameRankingSettings> rankingSettings;
@@ -426,11 +430,19 @@ class XbandDashboard {
         auto f=CreateFontW(-size,0,0,0,FW_NORMAL,FALSE,FALSE,FALSE,DEFAULT_CHARSET,0,0,CLEARTYPE_QUALITY,0,L"Segoe UI");
         auto old=SelectObject(d,f);SetBkMode(d,TRANSPARENT);SetTextColor(d,color);RECT r{x,y,x+w,y+64};DrawTextW(d,s.c_str(),-1,&r,DT_LEFT|DT_WORDBREAK|DT_NOPREFIX);SelectObject(d,old);DeleteObject(f);
     }
+    static void arrow(HDC d,int x1,int x2,int y,COLORREF color,bool forward,bool backward){
+        auto pen=CreatePen(PS_SOLID,2,color);auto old=SelectObject(d,pen);
+        MoveToEx(d,x1,y,nullptr);LineTo(d,x2,y);
+        if(forward){MoveToEx(d,x2-8,y-5,nullptr);LineTo(d,x2,y);LineTo(d,x2-8,y+5);}
+        if(backward){MoveToEx(d,x1+8,y-5,nullptr);LineTo(d,x1,y);LineTo(d,x1+8,y+5);}
+        if(!forward&&!backward){const int mid=(x1+x2)/2;MoveToEx(d,mid-5,y-5,nullptr);LineTo(d,mid+5,y+5);MoveToEx(d,mid-5,y+5,nullptr);LineTo(d,mid+5,y-5);}
+        SelectObject(d,old);DeleteObject(pen);
+    }
     void draw(HDC d){
         rect(d,0,0,1080,800,RGB(13,20,33));
-        text(d,30,8,1000,L"XBAND  /  COMMUNICATION MONITOR",28);
-        text(d,30,45,1000,L"LOCAL TCP   127.0.0.1   |   Live counters / read-only   |   500 ms updates",16,RGB(132,154,180));
-        if(data.empty()){text(d,30,130,950,L"Waiting for server state...");return;}
+        text(d,30,8,1000,L"XBAND  /  通信モニター",28);
+        text(d,30,45,1000,L"ローカルTCP   127.0.0.1   |   通信状況 / 読み取り専用   |   500ミリ秒ごとに更新",16,RGB(132,154,180));
+        if(data.empty()){text(d,30,130,950,L"サーバーの状態を取得しています...");return;}
         const auto progress=data.value("diagnostic_test_progress",std::string{});
         if(!progress.empty())text(d,30,724,1020,wide(progress),14,RGB(255,207,125));
         const auto &p=data.at("pair_control");const unsigned state=p.at("state");const bool failed=p.at("failed");
@@ -443,14 +455,15 @@ class XbandDashboard {
             text(d,x+18,137,270,L"MODEM "+std::to_wstring(i+1),24);
             text(d,x+18,175,270,connected?L"SERVER ONLINE":L"SERVER OFFLINE",18,connected?RGB(63,219,169):RGB(151,165,185));
             text(d,x+18,205,270,L"Phone: "+wide(diagnostic::modemSubscriberDisplay(o)),16);
+            text(d,x+18,228,280,callTimers[i].display(GetTickCount64()),14,RGB(132,154,180));
             text(d,x+18,250,270,failed?L"Peer session disconnected":joined?(state==2?L"Peer call connected":state==1?(unsigned(i)==caller?L"Calling modem "+std::to_wstring(callee+1):L"Incoming from modem "+std::to_wstring(caller+1)):L"Waiting for call"):L"Peer endpoint offline",17);
             text(d,x+18,299,270,L"Service: UP "+wide(o.at("received").get<std::string>())+L" B / DOWN "+wide(o.at("sent").get<std::string>())+L" B",15);
             text(d,x+18,323,270,wide(xband::monitor::mailSavedLine(o)),13);
             text(d,x+18,347,270,wide(xband::monitor::mailIncomingLine(o)),13);
             text(d,x+18,371,270,wide(xband::monitor::mailHeldLine(o)),13);
             text(d,x+18,395,270,wide(xband::monitor::mailClearLine(o)),13);
-            text(d,x+18,420,270,L"Last service call / not delivery proof",12,RGB(132,154,180));
-            text(d,x+18,444,270,L"Card: unknown (not reported)",13,RGB(132,154,180));
+            const bool line=telephoneLine[i].load();
+            text(d,x+18,420,270,line?L"電話線：接続（ON）":L"電話線：切断（OFF）",16,line?RGB(63,219,169):RGB(255,133,133));
         }
         rect(d,370,120,340,350,RGB(24,43,61));text(d,391,137,295,L"XBAND SERVER",24);
         text(d,391,185,295,failed?L"SESSION CLOSED":state==2?L"PEER RELAY ACTIVE":state==1?L"INCOMING CALL":caller==2&&(requested[0]||requested[1])?L"WAITING FOR OTHER GAME":L"READY / WAITING",20,failed?RGB(255,133,133):RGB(63,219,169));
@@ -462,10 +475,30 @@ class XbandDashboard {
             L"Generation "+std::to_wstring(p.at("generation").get<uint64_t>()),14);
         text(d,391,366,295,wide(xband::monitor::mailStorageLine(capture)),12,RGB(132,154,180));
         if(capture.value("enabled",false))text(d,391,395,295,L"Saved != delivered\nNo delivery / read receipt",13,RGB(255,207,125));
-        for(int i=0;i<2;++i){int y=490+i*61;bool active=rate[i]>0&&GetTickCount64()-last<2000;
-            rect(d,30,y,1020,51,RGB(25,38,57));rect(d,43,y+18,12,12,active?RGB(63,219,169):RGB(82,97,116));
+        const auto links=xband::monitor::connectionView(data,{telephoneLine[0].load(),telephoneLine[1].load()});
+        const auto green=RGB(63,219,169),gray=RGB(132,154,180),amber=RGB(255,207,125);
+        rect(d,30,480,1020,124,RGB(25,38,57));
+        text(d,48,487,120,L"モデム1",18);text(d,486,487,140,L"サーバー",18);text(d,918,487,120,L"モデム2",18);
+        for(unsigned i=0;i<2;++i){
+            const auto link=links.service[i];const bool call=link==xband::monitor::ServiceLink::calling;
+            const int x1=i?640:170,x2=i?900:450;
+            arrow(d,x1,x2,511,call?green:gray,call,call);
+            text(d,x1,483,x2-x1,call?L"サーバーと通信中":link==xband::monitor::ServiceLink::ready?L"通信路待機（通話なし）":L"未接続 / 電話線OFF",14,call?green:gray);
+        }
+        const auto peer=links.peer;using Peer=xband::monitor::PeerLink;
+        const bool linked=peer==Peer::connected,fromLeft=peer==Peer::dialingLeft,fromRight=peer==Peer::dialingRight;
+        arrow(d,170,900,549,linked?green:fromLeft||fromRight?amber:gray,linked||fromLeft,linked||fromRight);
+        const bool flowing=linked&&(rate[0]>0||rate[1]>0)&&GetTickCount64()-last<2000;
+        const auto peerLabel=linked?
+            std::wstring(flowing?L"回線接続・データ通信中：モデム":L"回線接続・データ停止：モデム")+
+                std::to_wstring(caller+1)+L"（発信）→ モデム"+std::to_wstring(callee+1)+L"（着信）":
+            fromLeft?std::wstring(L"モデム1（発信）→ モデム2（着信待ち）"):
+            fromRight?std::wstring(L"モデム2（発信）→ モデム1（着信待ち）"):
+            peer==Peer::disconnected?std::wstring(L"対戦接続：切断"):std::wstring(L"対戦接続：待機（通話なし）");
+        text(d,170,523,730,peerLabel,15,linked?green:fromLeft||fromRight?amber:gray);
+        for(int i=0;i<2;++i){const bool active=linked&&rate[i]>0&&GetTickCount64()-last<2000;
             auto sent=p.at("sent")[i].get<uint64_t>();auto received=p.at("received")[1-i].get<uint64_t>();
-            text(d,70,y+12,960,(i?L"2 -> 1":L"1 -> 2")+std::wstring(active?L"   DATA  ":L"   IDLE  ")+std::to_wstring(rate[i])+L" B/s    accepted "+std::to_wstring(sent)+L" B    delivered "+std::to_wstring(received)+L" B    queued "+std::to_wstring(sent>=received?sent-received:0)+L" B",17);
+            text(d,48+i*510,568,492,(i?L"2 → 1":L"1 → 2")+std::wstring(active?L" 通信中 ":L" 停止 ")+std::to_wstring(active?rate[i]:0)+L" B/s  受付 "+std::to_wstring(sent)+L" / 配送 "+std::to_wstring(received)+L" / 待ち "+std::to_wstring(sent>=received?sent-received:0)+L" B",13,active?green:gray);
         }
         text(d,30,616,1020,L"Recent game bytes: HEX + ASCII text (binary = \\xHH; not protocol decoding)",14,RGB(132,154,180));
         for(int i=0;i<2;++i){
@@ -492,11 +525,24 @@ class XbandDashboard {
             if(SendMessageW(h,WM_GETFONT,0,0)!=reinterpret_cast<LRESULT>(font))
                 SendMessageW(h,WM_SETFONT,reinterpret_cast<WPARAM>(font),TRUE);
         }
+        for(int i=0;i<2;++i)if(auto h=GetDlgItem(w,990+i)){
+            const int x=(i?758:48)*r.right/1080,y=444*r.bottom/800;
+            const int width=270*r.right/1080,height=24*r.bottom/800;
+            RECT previous{};GetWindowRect(h,&previous);MapWindowPoints(nullptr,w,reinterpret_cast<POINT*>(&previous),2);
+            if(previous.left!=x||previous.top!=y||previous.right-previous.left!=width||previous.bottom-previous.top!=height)
+                MoveWindow(h,x,y,width,height,TRUE);
+            const auto font=GetStockObject(DEFAULT_GUI_FONT);
+            if(SendMessageW(h,WM_GETFONT,0,0)!=reinterpret_cast<LRESULT>(font))SendMessageW(h,WM_SETFONT,reinterpret_cast<WPARAM>(font),TRUE);
+        }
     }
     static LRESULT CALLBACK proc(HWND w,UINT m,WPARAM a,LPARAM b){
         auto s=reinterpret_cast<XbandDashboard*>(GetWindowLongPtrW(w,GWLP_USERDATA));
         if(m==WM_NCCREATE){s=static_cast<XbandDashboard*>(reinterpret_cast<CREATESTRUCTW*>(b)->lpCreateParams);SetWindowLongPtrW(w,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(s));}
         if(!s)return DefWindowProcW(w,m,a,b);
+        if(m==WM_CREATE){
+            for(int i=0;i<2;++i)CreateWindowW(L"BUTTON",L"電話線を切断（OFF）",WS_CHILD|WS_VISIBLE|WS_TABSTOP,0,0,0,0,w,reinterpret_cast<HMENU>(INT_PTR(990+i)),GetModuleHandleW(nullptr),nullptr);
+            layoutButtons(w);return 0;
+        }
         if(m==WM_SIZE){layoutButtons(w);return 0;}
         if(m>=WM_APP+41&&m<=WM_APP+46){
             const int ids[]={900,950,979,978,975,976};const wchar_t* labels[]={L"ゲーム・ポイント設定...",L"使用状況の表示設定...",L"メール履歴...",L"接続・対戦・ポイント履歴...",L"対戦待ち時間設定...",L"消費度数設定..."};
@@ -505,6 +551,12 @@ class XbandDashboard {
             layoutButtons(w);return 0;
         }
         if(m==WM_TIMER){InvalidateRect(w,nullptr,FALSE);return 0;}
+        if(m==WM_COMMAND&&(LOWORD(a)==990||LOWORD(a)==991)&&HIWORD(a)==BN_CLICKED){
+            const unsigned side=LOWORD(a)-990;
+            const bool connected=!s->telephoneLine[side].load();s->telephoneLine[side]=connected;
+            SetWindowTextW(GetDlgItem(w,990+side),connected?L"電話線を切断（OFF）":L"電話線を接続（ON）");
+            InvalidateRect(w,nullptr,FALSE);return 0;
+        }
         if(m==WM_COMMAND&&LOWORD(a)==979){s->openMail(w);return 0;}
         if(m==WM_COMMAND&&LOWORD(a)==978){s->activityWindow.open(w);return 0;}
         if(m==WM_COMMAND&&LOWORD(a)==900){s->openRankings(w);return 0;}
@@ -517,6 +569,7 @@ class XbandDashboard {
         if(m==WM_DESTROY){s->closed=true;s->hwnd=nullptr;PostQuitMessage(0);return 0;}return DefWindowProcW(w,m,a,b);
     }
 public:
+    bool telephoneLineConnected(unsigned side)const{return telephoneLine.at(side).load();}
     void setServiceCreditSettings(std::shared_ptr<diagnostic::ServiceCreditSettings> value){
         {std::lock_guard lock(mutex);creditWindow.setSettings(std::move(value));}
         if(auto w=hwnd.load())PostMessageW(w,WM_APP+46,0,0);
@@ -742,7 +795,8 @@ public:
         }
         DestroyWindow(fixture.rankingWindow);Gdiplus::GdiplusShutdown(token);
     }
-    static void renderSnapshot(const J &snapshot,const std::filesystem::path &path){
+    static void renderSnapshot(const J &snapshot,const std::filesystem::path &path,
+                               std::array<bool,2> line={true,true}){
         if(std::filesystem::exists(path))throw std::runtime_error("Preserve existing preview");
         ULONG_PTR token{};Gdiplus::GdiplusStartupInput input;
         if(Gdiplus::GdiplusStartup(&token,&input,nullptr)!=Gdiplus::Ok)throw std::runtime_error("GDI+ startup failed");
@@ -750,7 +804,17 @@ public:
         Gdiplus::Bitmap bitmap(1080,800,PixelFormat32bppRGB);
         {
             Gdiplus::Graphics graphics(&bitmap);const auto dc=graphics.GetHDC();
-            XbandDashboard fixture(SnapshotOnly{});fixture.data=snapshot;fixture.draw(dc);
+            XbandDashboard fixture(SnapshotOnly{});fixture.data=snapshot;
+            for(unsigned i=0;i<2;++i)fixture.telephoneLine[i]=line[i];
+            if(!snapshot.empty()){
+                const auto links=xband::monitor::connectionView(snapshot,line);
+                const auto now=GetTickCount64();
+                for(unsigned i=0;i<2;++i)fixture.callTimers[i].observe(
+                    links.peer==xband::monitor::PeerLink::connected?xband::monitor::CallKind::peer:
+                    links.service[i]==xband::monitor::ServiceLink::calling?xband::monitor::CallKind::service:xband::monitor::CallKind::none,
+                    snapshot.at("pair_control").value("generation",uint64_t{}),now>=65000?now-65000:now);
+            }
+            fixture.draw(dc);
             WNDCLASSW c{};c.lpfnWndProc=DefWindowProcW;c.hInstance=GetModuleHandleW(nullptr);c.lpszClassName=L"XbandButtonLayoutPreview";RegisterClassW(&c);
             HWND w=CreateWindowW(c.lpszClassName,L"",WS_POPUP|WS_CLIPCHILDREN,-30000,-30000,1080,800,nullptr,nullptr,c.hInstance,nullptr);
             if(!w)throw std::runtime_error("Button test window");
@@ -783,22 +847,31 @@ public:
         HWND w=CreateWindowW(c.lpszClassName,L"",WS_POPUP|WS_CLIPCHILDREN,-30000,-30000,1080,800,nullptr,nullptr,c.hInstance,&fixture);
         check(w!=nullptr);check((GetWindowLongPtrW(w,GWL_STYLE)&WS_CLIPCHILDREN)!=0);
         for(unsigned i=0;i<6;++i)SendMessageW(w,WM_APP+41+i,0,0);
+        check(fixture.telephoneLineConnected(0)&&fixture.telephoneLineConnected(1));
+        SendMessageW(w,WM_COMMAND,MAKEWPARAM(990,BN_CLICKED),0);
+        check(!fixture.telephoneLineConnected(0)&&fixture.telephoneLineConnected(1));
+        wchar_t label[80]{};GetWindowTextW(GetDlgItem(w,990),label,80);
+        check(std::wstring_view(label)==L"電話線を接続（ON）");
+        SendMessageW(w,WM_COMMAND,MAKEWPARAM(991,BN_CLICKED),0);
+        check(!fixture.telephoneLineConnected(0)&&!fixture.telephoneLineConnected(1));
+        SendMessageW(w,WM_COMMAND,MAKEWPARAM(990,BN_CLICKED),0);
+        check(fixture.telephoneLineConnected(0)&&!fixture.telephoneLineConnected(1));
         unsigned changes=0;
         const auto observer=+[](HWND child,UINT message,WPARAM a,LPARAM b,UINT_PTR,DWORD_PTR reference)->LRESULT{
             if(message==WM_SETFONT||message==WM_WINDOWPOSCHANGED)++*reinterpret_cast<unsigned*>(reference);
             return DefSubclassProc(child,message,a,b);
         };
-        for(int id:{979,978,950,975,900,976}){
+        for(int id:{979,978,950,975,900,976,990,991}){
             auto h=GetDlgItem(w,id);check(h!=nullptr);
             check(SetWindowSubclass(h,observer,1,reinterpret_cast<DWORD_PTR>(&changes))!=FALSE);
             ValidateRect(h,nullptr);
         }
         for(unsigned i=0;i<20;++i){layoutButtons(w);SendMessageW(w,WM_TIMER,1,0);}
         check(changes==0);
-        for(int id:{979,978,950,975,900,976})check(!GetUpdateRect(GetDlgItem(w,id),nullptr,FALSE));
+        for(int id:{979,978,950,975,900,976,990,991})check(!GetUpdateRect(GetDlgItem(w,id),nullptr,FALSE));
         SetWindowPos(w,nullptr,0,0,1200,900,SWP_NOMOVE|SWP_NOZORDER|SWP_NOACTIVATE);
         check(changes>0);const auto afterResize=changes;layoutButtons(w);check(changes==afterResize);
-        for(int id:{979,978,950,975,900,976})RemoveWindowSubclass(GetDlgItem(w,id),observer,1);
+        for(int id:{979,978,950,975,900,976,990,991})RemoveWindowSubclass(GetDlgItem(w,id),observer,1);
         DestroyWindow(w);
     }
 #endif
@@ -807,6 +880,11 @@ public:
     ~XbandDashboard(){if(auto w=hwnd.load())PostMessage(w,WM_CLOSE,0,0);if(worker.joinable())worker.join();}
     bool isClosed()const{return closed;}
     void publish(const J&v){std::lock_guard lock(mutex);const auto now=GetTickCount64();const auto&p=v.at("pair_control");
+        const auto links=xband::monitor::connectionView(v,{telephoneLine[0].load(),telephoneLine[1].load()});
+        for(unsigned i=0;i<2;++i)callTimers[i].observe(
+            links.peer==xband::monitor::PeerLink::connected?xband::monitor::CallKind::peer:
+            links.service[i]==xband::monitor::ServiceLink::calling?xband::monitor::CallKind::service:xband::monitor::CallKind::none,
+            p.value("generation",uint64_t{}),now);
         for(int i=0;i<2;++i){auto n=p.at("sent")[i].get<uint64_t>();rate[i]=last&&now>last&&n>=prior[i]?(n-prior[i])*1000/(now-last):0;prior[i]=n;}
         last=now;auto state=p.at("state").dump()+"/"+p.at("failed").dump()+"/"+p.at("joined").dump();
         if(state!=previousState){SYSTEMTIME t;GetLocalTime(&t);std::wostringstream o;o<<std::setfill(L'0')<<std::setw(2)<<t.wHour<<L":"<<std::setw(2)<<t.wMinute<<L":"<<std::setw(2)<<t.wSecond<<L"  State changed: "<<wide(state);events.push_back(o.str());if(events.size()>20)events.pop_front();previousState=state;}data=v;

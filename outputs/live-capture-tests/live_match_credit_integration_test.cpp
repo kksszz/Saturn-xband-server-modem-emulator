@@ -205,7 +205,7 @@ int main(){try{
         check(f.matches->snapshot().at("match/1").at("reports").at(1-first).is_null());
         f.matches=std::make_shared<Match>(root/("independent-first-"+std::to_string(first)+"-"+std::to_string(unknown))/"matches.json");
         auto peer=f.service(1-first,request(1-first,100,0x10003,unknown?-607:0));
-        if(unknown)check(peer->testTCP().pollServiceReply()[40]==0x22);
+        if(unknown){unsigned peerPrep=0,peerOrdinary=0;nativeDebit(*peer,100,1-first,1,false,peerPrep,peerOrdinary);}
         else{unsigned peerPrep=0,peerOrdinary=0;nativeDebit(*peer,100,1-first,4,false,peerPrep,peerOrdinary);}
         check(f.ledger->snapshot().at(key)==receipt);
         check(f.matches->snapshot().at("match/1").at("comparison")=="unresolved-or-conflicting-reports");
@@ -225,8 +225,9 @@ int main(){try{
     {
         Fixture f(root/"transport",10);f.end(true);
         auto s=f.service(0,request(0,10,0x10003,-607));
-        const auto response=s->testTCP().pollServiceReply();
-        check(!response.empty()&&response[40]==0x22&&f.ledger->snapshot().empty());++cases;
+        unsigned prep=0,ordinary=0;nativeDebit(*s,10,0,1,false,prep,ordinary);
+        check(f.matches->snapshot().at("match/1").at("participants").at(0).at("deferred")==true);
+        check(!f.ledger->snapshot().contains("match/1/side:0"));++cases;
     }
     // Rate freezes at start. Current settings do not rewrite old normal3.
     {
@@ -240,12 +241,41 @@ int main(){try{
     // Owner/profile mutation, incomplete request, and missing ledger fail closed.
     {
         Fixture f(root/"blocked",10);f.end();
-        auto changed=f.service(0,request(0,10,0x10003,0,true,1));
+        auto invalid=request(0,10);invalid[138]=9;
+        auto changed=f.service(0,invalid);
         check(changed->testTCP().pollServiceReply()[40]==0x22&&f.ledger->snapshot().empty());
         auto partial=f.service(0,request(0,10));partial->testTCP().captured.pop_back();
         check(partial->testTCP().pollServiceReply().empty()&&f.ledger->snapshot().empty());
         auto missing=f.service(0,request(0,10));missing->setMatchCredits({});
         check(missing->testTCP().pollServiceReply()[40]==0x22&&f.ledger->snapshot().empty());++cases;
+    }
+    // Unclassified/stale results retain evidence, bill only mail, and allow
+    // a new carrier. Its baseline prevents reusing the held old report.
+    for(bool stale:{false,true}){
+        Fixture f(root/(stale?"deferred-stale":"deferred-unknown"),10);f.end();
+        control(f.left,{{"op","closed_ack"},{"generation",f.pair->generation}});
+        control(f.right,{{"op","closed_ack"},{"generation",f.pair->generation}});
+        for(unsigned side=0;side<2;++side){
+            auto wire=stale?initialRequest(side,10):request(side,10,0x10003,-610);
+            wire[173]=4; // Mail access, retaining the frozen stale result.
+            auto s=f.service(side,wire);unsigned prep=0,ordinary=0;
+            nativeDebit(*s,10,side,1,false,prep,ordinary);
+            const auto p=f.matches->snapshot().at("match/1").at("participants").at(side);
+            check(p.at("deferred")==true&&p.at("claim").is_null()&&!p.at("settled").get<bool>());
+            check(!f.ledger->snapshot().contains("match/1/side:"+std::to_string(side)));
+            auto c=f.pair->activityContext[side];c["credit_baseline"]=LocalTCPProbe::observedGameResult(wire,true);
+            f.pair->activityContext[side]=c;
+        }
+        const auto held=f.matches->snapshot().at("match/1");
+        const auto key=f.matches->begin(2,f.pair->activityContext,{true,3,1,1});f.matches->end(key);
+        for(unsigned side=0;side<2;++side){
+            auto wire=stale?initialRequest(side,9):request(side,9,0x10003,-610);
+            check(f.matches->observeAndPlan(side,wire,1,true,*f.ledger).state==Match::Plan::State::Deferred);
+        }
+        check(f.matches->snapshot().at("match/1")==held);
+        Match restored(root/(stale?"deferred-stale":"deferred-unknown")/"matches.json");
+        check(restored.observeAndPlan(0,request(0,9),1,true,*f.ledger).state==Match::Plan::State::None);
+        check(restored.snapshot()==f.matches->snapshot());++cases;
     }
     // A timeout is durable uncertain. New login explains block, never reissues49.
     // Settle on a matchmaking login, then establish the next real carrier.

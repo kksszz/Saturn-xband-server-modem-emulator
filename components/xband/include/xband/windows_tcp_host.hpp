@@ -101,6 +101,12 @@ public:
     uint16_t port() const noexcept { return port_; }
     size_t clientCount() const noexcept { return clients_.size(); }
     bool stopped() const noexcept { return stopped_; }
+    // Owner thread only. Keep the listener reserved but reject all sessions
+    // while the simulated telephone line is absent. ON never restores a call.
+    void setAccepting(bool accepting) noexcept {
+        accepting_ = accepting;
+        if (!accepting_) clients_.clear();
+    }
     // Caller may select() over several hosts together, then call step().
     // The caller still owns heartbeat/deadline scheduling and the timeout.
     bool appendWaitSockets(fd_set &readable,fd_set &writable) const noexcept {
@@ -146,7 +152,7 @@ public:
                     if (WSAGetLastError() == WSAEWOULDBLOCK) break;
                     stop(); return false;
                 }
-                if (clients_.size() == max_clients) continue; // RAII closes excess sockets.
+                if (!accepting_ || clients_.size() == max_clients) continue; // RAII closes rejected sockets.
                 nonblocking(accepted.get());
                 clients_.push_back(std::make_unique<Peer>(std::move(accepted), registry_, now, clock_, factory_));
             }
@@ -207,6 +213,6 @@ private:
     protocol::EndpointRegistry registry_; FrameClock clock_; protocol::ServerSession::Factory factory_;
     Socket listener_; std::vector<std::unique_ptr<Peer>> clients_;
     std::vector<std::string> endpoint_names_;
-    uint16_t port_ = 0; uint64_t last_time_ = 0; bool started_ = false, stopped_ = false;
+    uint16_t port_ = 0; uint64_t last_time_ = 0; bool started_ = false, stopped_ = false, accepting_ = true;
 };
 }

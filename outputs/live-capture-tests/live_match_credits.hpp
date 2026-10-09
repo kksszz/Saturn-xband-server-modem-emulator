@@ -7,7 +7,8 @@
 
 namespace diagnostic {
 // Local server correlation, NOT a ROM transaction ID. No history scan/import.
-// One outstanding episode per endpoint/account; baselines frozen at carrier
+// One automatically payable episode per endpoint/account; deferred evidence
+// remains archived without blocking new episodes. Baselines frozen at carrier
 // start; each endpoint settles from its own fresh report, independently of
 // peer access. Reciprocal comparison is audit-only, never a debit barrier.
 class LiveMatchCredits {
@@ -28,7 +29,7 @@ class LiveMatchCredits {
         if(!MoveFileExW(temp.c_str(),path.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH))throw std::runtime_error("Match credit commit failed");
         saved=next;file=std::move(next);
     }
-    static bool pending(const J& row,unsigned side){const auto& p=row.at("participants").at(side);return !p.value("settled",p.at("paid").get<bool>());}
+    static bool pending(const J& row,unsigned side){const auto& p=row.at("participants").at(side);return !p.value("deferred",false)&&!p.value("settled",p.at("paid").get<bool>());}
     static bool finiteCard(const J& card){
         if(!card.is_object()||!card.contains("raw")||!card.at("raw").is_array()||card.at("raw").size()!=13||
            !card.contains("value")||!card.at("value").is_number_integer())return false;
@@ -49,7 +50,7 @@ class LiveMatchCredits {
             const auto& report=row.at("reports").at(side);
             // Preserve already frozen legacy fees/claims; no retrospective
             // repricing when a peer reports or an old ledger is reopened.
-            if(report.is_null()||!row.at("fees").at(side).is_null()||word(report,4)!=row.at("game"))continue;
+            if(row.at("participants").at(side).value("deferred",false)||report.is_null()||!row.at("fees").at(side).is_null()||word(report,4)!=row.at("game"))continue;
             const auto e=error(report);
             if(report.at("opcode")==0x20&&e==0&&
                uint64_t(word(report,12))+word(report,16)+word(report,20)+word(report,24)>0){
@@ -81,7 +82,7 @@ public:
     // Explicit local policy frozen by the carrier hook. Importing legacy
     // settings does not enable it; new matches require an operator opt-in.
     struct Policy{bool enabled=false;unsigned normal=3;int resetScope=1,includeMail=1;};
-    struct Plan{enum class State{None,Waiting,Ready,Blocked};State state=State::None;std::string episode,debitKey;unsigned amount=0;bool mailDenied=false;};
+    struct Plan{enum class State{None,Waiting,Ready,Blocked,Deferred};State state=State::None;std::string episode,debitKey;unsigned amount=0;bool mailDenied=false;};
     explicit LiveMatchCredits(std::filesystem::path value):path(std::move(value)){
         auto temp=path;temp+=L".tmp";if(std::filesystem::exists(temp))throw std::runtime_error("Interrupted match credit commit");
         if(!std::filesystem::exists(path))return;std::ifstream in(path,std::ios::binary);file=J::parse(in);saved=file;
@@ -110,8 +111,11 @@ public:
                     !p.at("paid").is_boolean()||!p.at("baseline").is_array()||
                     (!p.at("baseline").empty()&&p.at("baseline").size()!=84)||!finiteCard(p.at("card"))||
                     (p.contains("settled")&&!p.at("settled").is_boolean())||
-                    (p.contains("report_conflict")&&!p.at("report_conflict").is_boolean()))
+                    (p.contains("report_conflict")&&!p.at("report_conflict").is_boolean())||
+                    (p.contains("deferred")&&!p.at("deferred").is_boolean()))
                     throw std::runtime_error("Invalid saved match participant");
+                if(p.value("deferred",false)&&(!p.at("claim").is_null()||p.value("settled",false)||p.at("paid").get<bool>()))
+                    throw std::runtime_error("Deferred match cannot have a debit claim or receipt");
                 if(!p.at("claim").is_null()){
                     const auto& claim=p.at("claim");
                     if(claim.at("amount").get<unsigned>()>32767||!claim.at("mail_denied").is_boolean()||
@@ -192,13 +196,23 @@ public:
         if(key.empty())return {};
         auto next=file;auto& row=next["episodes"][key];auto& participant=row["participants"][side];
         const auto debitKey=key+"/side:"+std::to_string(side);
-        if(request.at(xband::registrationOffset(request,43))!=participant.at("profile")||
-           LocalTCPProbe::longword(request,xband::registrationAfterCardOffset(request,144))!=row.at("game"))
-            return {Plan::State::Blocked,key,debitKey};
         const auto starting=participant.at("card").at("raw").get<std::array<uint8_t,13>>();
         if(!card.raw||!finiteCard(J{{"value",card.value},{"raw",*card.raw}})||
            !std::equal(starting.begin(),starting.begin()+8,card.raw->begin()))return {Plan::State::Blocked,key,debitKey};
         const auto ledger=debits.snapshot();
+        // Only an ended, unclaimed episode may leave automatic settlement.
+        // Keep its evidence permanently; never attach a later result to it.
+        // Issued/uncertain charges and identity/storage faults stay fail-closed.
+        const auto defer=[&](const char* reason)->Plan{
+            if(row.at("phase")=="open"||row.at("phase")=="blocked"||
+               !participant.at("claim").is_null()||ledger.contains(debitKey))return {Plan::State::Blocked,key,debitKey};
+            participant["deferred"]=true;participant["settlement_state"]="deferred-review";
+            participant["deferred_reason"]=reason;participant["deferred_observed_raw"]=raw;
+            commit(next);return {Plan::State::Deferred,key,debitKey};
+        };
+        if(request.at(xband::registrationOffset(request,43))!=participant.at("profile")||
+           LocalTCPProbe::longword(request,xband::registrationAfterCardOffset(request,144))!=row.at("game"))
+            return defer("registered-context-changed");
         if(!participant.at("claim").is_null()&&ledger.contains(debitKey)&&
            (ledger.at(debitKey).at("state")=="confirmed"||ledger.at(debitKey).at("state")=="exhausted")){
             const auto& claim=participant.at("claim");
@@ -218,13 +232,13 @@ public:
         }
         if(row.at("phase")=="blocked")return {Plan::State::Blocked,key,debitKey};
         if(row.at("phase")=="open")return {Plan::State::Waiting,key,debitKey};
-        if(raw.empty()||J(raw)==participant.at("baseline"))return {Plan::State::Waiting,key,debitKey};
+        if(raw.empty()||J(raw)==participant.at("baseline"))return defer("fresh-result-missing");
         const J report{{"opcode",opcode},{"raw",raw}};
         if(participant.value("report_conflict",false))return {Plan::State::Blocked,key,debitKey};
         if(row["reports"][side].is_null()){row["reports"][side]=report;resolve(row);commit(next);}
         else if(row.at("reports").at(side)!=report){participant["report_conflict"]=true;commit(next);return {Plan::State::Blocked,key,debitKey};}
         else{resolve(row);if(next!=file)commit(next);}
-        if(!row.contains("fees")||row.at("fees").at(side).is_null())return {Plan::State::Waiting,key,debitKey};
+        if(!row.contains("fees")||row.at("fees").at(side).is_null())return defer("result-unclassified");
         if(!participant.at("claim").is_null())return {Plan::State::Ready,key,debitKey,participant.at("claim").at("amount").get<unsigned>(),participant.at("claim").at("mail_denied").get<bool>()};
         const bool mailCall=LocalTCPProbe::serviceRequestCode(request,true)==4;
         const unsigned matchUnits=row.at("fees").at(side).get<unsigned>();

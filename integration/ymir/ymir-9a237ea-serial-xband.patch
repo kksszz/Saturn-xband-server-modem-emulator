@@ -304,7 +304,7 @@ index 9a6baee..b25839e 100644
                  break;
              case HardReset:
 +#ifdef YMIR_XBAND_FRONTEND
-+                m_modem.reset("Hard reset: restart server pair and reconnect modem");
++                m_modem.hardReset();
 +#endif
                  m_context.saturn.instance->Reset(true);
                  m_context.rewindBuffer.Reset();
@@ -312,12 +312,22 @@ index 9a6baee..b25839e 100644
                  break;
              case SoftReset:
 +#ifdef YMIR_XBAND_FRONTEND
-+                m_modem.reset("Soft reset: restart server pair and reconnect modem");
++                m_modem.softReset();
 +#endif
                  m_context.saturn.instance->Reset(false);
                  m_context.DisplayMessage("Soft reset triggered");
                  break;
-@@ -3487,6 +3634,7 @@ void App::EmulatorThread() {
+@@ -3459,6 +3606,9 @@ void App::EmulatorThread() {
+             case SetResetButton:
++#ifdef YMIR_XBAND_FRONTEND
++                m_modem.consoleResetButton(std::get<bool>(evt.value));
++#endif
+                 m_context.saturn.instance->SMPC.SetResetButtonState(std::get<bool>(evt.value));
+                 if (std::get<bool>(evt.value)) {
+                     m_context.DisplayMessage("Soft reset triggered");
+                 }
+                 break;
+@@ -3487,6 +3637,7 @@ void App::EmulatorThread() {
                  m_context.audioSystem.SetSilent(false);
                  break;
              case StepMSH2:

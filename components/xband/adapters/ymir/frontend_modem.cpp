@@ -62,7 +62,13 @@ struct FrontendModem::Impl {
     bool enabled=false,failed=false,closeService=false,serviceBatch=false,controlBusy=false,joined=false;
     bool peer=false,ring=false,answering=false,clockReady=false,needStep=false,sample=false,timelineKnown=false;
     bool serviceBegun=false;
+    bool telephoneLineConnected=true;
+    uint64_t serviceFailureSince=0;
+    uint64_t controlRetryAt=0;
     bool peerEnding=false,peerClosed=false,peerDialing=false;
+    bool resetButtonPressed=false,resetButtonArmed=false,resetBoardProbe=false;
+    uint64_t resetButtonTicket=0;
+    uint64_t resetButtonSoftResets=0;
     unsigned caller=2; // undecided until the game submits its service request
     uint64_t timeline=0;
     unsigned serviceFrame=~0u;
@@ -127,7 +133,52 @@ struct FrontendModem::Impl {
         }
         return localDialRole(number,config.side,serviceBegun);
     }
-    void publish(){std::lock_guard lock(mutex);published={enabled,peer||(session&&session->carrier()),frame,sent,received,status,bool(cardStorage),card.present};}
+    void publish(){std::lock_guard lock(mutex);published={enabled,peer||(session&&session->carrier()),frame,sent,received,status,bool(cardStorage),card.present,telephoneLineConnected};}
+    std::unique_ptr<Client> serviceConnection(uint64_t now){
+        return std::make_unique<Client>(windows::ClientConfig{
+            config.address,uint16_t(config.port+config.side),config.allowLAN,"pb3-"+std::to_string(config.side),std::string(64,'a'),60},now);
+    }
+    void dropTelephoneCall(){
+        service.reset();buffer.reset();serviceBatch=closeService=false;
+        peer=false;peerDialing=answering=ring=false;clockReady=needStep=sample=false;
+        peerTX.clear();peerUart.reset();asyncReceive.reset();peerDialGate.reset();
+        standbyObserver.reset();standbyNotice.reset();
+        session->disconnected(frame);
+    }
+    void finishResetButtonCall(){
+        if(!resetButtonArmed)return;
+        if(!peer||!session||session->ticket()!=resetButtonTicket){
+            resetButtonArmed=resetBoardProbe=false;return;
+        }
+        const bool systemReset=saturn->GetResetDiagnostics().softResets!=resetButtonSoftResets;
+        if(!resetBoardProbe&&!systemReset)return;
+        resetButtonArmed=resetBoardProbe=false;
+        dropTelephoneCall();peerEnding=true;
+        // A genuine console reset has a new timeline. Save-state changes do
+        // not increment softResets and retain the existing safety behavior.
+        if(systemReset)timelineKnown=false;
+        pending={{"op","hangup"},{"generation",generation}};
+        status="Reset-button guest reinitialization: closing previous peer call";
+        if(trace)std::fprintf(stderr,"XBAND_RESET_BUTTON_CLOSE side=%d generation=%llu frame=%u system_reset=%d\n",
+            config.side,static_cast<unsigned long long>(generation),frame,int(systemReset));
+    }
+    void applyTelephoneLine(bool connected,uint64_t now){
+        if(telephoneLineConnected==connected)return;
+        telephoneLineConnected=connected;serviceFailureSince=0;
+        if(!connected){
+            // Remove only telephone carriers. Board/flash/card/profile survive.
+            service.reset();buffer.reset();serviceBatch=closeService=false;
+            peer=false;peerDialing=answering=ring=false;clockReady=needStep=sample=false;
+            peerTX.clear();peerUart.reset();asyncReceive.reset();peerDialGate.reset();
+            standbyObserver.reset();standbyNotice.reset();
+            session->disconnected(frame);
+            pending={{"op","poll"}};
+            status="電話線が切断されています（OFF）";
+        }else{
+            service=serviceConnection(now);serviceFrame=~0u;
+            status="電話線を接続しました。ゲーム側から再接続してください";
+        }
+    }
     void stop(const char *reason){
         enabled=false;failed=false;peer=false;clockReady=false;needStep=false;sample=false;
         session.reset();service.reset();control.reset();buffer.reset();peerTX.clear();bank.rx.clear();
@@ -138,7 +189,11 @@ struct FrontendModem::Impl {
     }
     void fail(const char *reason){
         std::fprintf(stderr,"XBAND_MODEM_FAILURE side=%d reason=%s\n",config.side,reason);
-        std::fflush(stderr);stop(reason);failed=true;
+        std::fflush(stderr);
+        // Even a diagnostic protocol/storage fault is not a physical modem
+        // power switch. Disable unsafe network work, retaining board/AT/card.
+        if(enabled&&session){dropTelephoneCall();control.reset();status=reason;failed=true;publish();}
+        else{stop(reason);failed=true;}
     }
     void start(Config c){
         stop("Starting");config=std::move(c);
@@ -151,6 +206,8 @@ struct FrontendModem::Impl {
         idReads=uartReads=uartWrites=commands=0;traceFrame=~0u;
         peerSent=peerReceived=0;
         serviceBegun=false;caller=2;peerEnding=peerClosed=peerDialing=false;
+        resetButtonPressed=resetButtonArmed=resetBoardProbe=false;resetButtonTicket=0;
+        telephoneLineConnected=true;serviceFailureSince=controlRetryAt=0;
         peerSessionTicket=0;
         nextRingFrame=0;
         closeService=serviceBatch=controlBusy=joined=ring=answering=timelineKnown=false;serviceFrame=~0u;pending={{"op","join"}};
@@ -175,6 +232,7 @@ struct FrontendModem::Impl {
             buffer.reset();closeService=true;
         };
         hooks.dial=[this](std::string_view number){
+            if(failed||!telephoneLineConnected)return ModemCommandSession::Dial::rejected;
             const auto role=dialRole(number);
             if(role==LocalDialRole::selfCheck){
                 status="Local phone setting check (BUSY)";
@@ -182,11 +240,16 @@ struct FrontendModem::Impl {
                 return ModemCommandSession::Dial::busy;
             }
             if(role!=LocalDialRole::service||!buffer.dial(number))return ModemCommandSession::Dial::rejected;
+            // New guest ATD only: never replay a failed service batch/debit.
+            if(!service)service=serviceConnection(GetTickCount64());
             serviceBegun=true;
             return ModemCommandSession::Dial::pending;
         };
         hooks.intercept=[this](const std::string &command){
             const auto decoded=decodeObservedAT(command,true);
+            if((failed||!telephoneLineConnected)&&(decoded.kind==ATKind::dial||decoded.kind==ATKind::answer)){
+                reply("\r\nNO CARRIER\r\n");return true;
+            }
             if(decoded.kind==ATKind::dial&&dialRole(decoded.number)==LocalDialRole::peer){
                 if(peerClosed||peerEnding){reply("\r\nNO CARRIER\r\n");return true;}
                 if(standbyExperiment){
@@ -241,7 +304,14 @@ struct FrontendModem::Impl {
             if(!cardStorage||a!=0x05885021||width!=1)return false;
             card.write(uint8_t(value));return true;
         };
-        if(trace)hooks.observedRead=[this](uint32_t a,unsigned width,uint32_t){if(a==0x05885029&&width==1)++idReads;};
+        hooks.observedRead=[this](uint32_t a,unsigned width,uint32_t){
+            if(a==0x05885029&&width==1){
+                if(trace)++idReads;
+                // A real mapped board-ID read after Reset-button NMI marks
+                // guest reinitialization. Debug peeks never call this hook.
+                if(resetButtonArmed)resetBoardProbe=true;
+            }
+        };
         hooks.mode=[] {return ModemRegisterBank::BoardMode{true,true,true,true};};
         hooks.uartRead=[this](uint32_t a){try{return uartRead(a);}catch(const std::exception&e){fail(e.what());return uint8_t(0);}};
         hooks.uartWrite=[this](uint32_t a,uint8_t v){try{uartWrite(a,v);}catch(const std::exception&e){fail(e.what());}};
@@ -253,6 +323,10 @@ struct FrontendModem::Impl {
             std::string response;control->drain([&](uint8_t b){if(response.size()==4096)return false;response+=char(b);return true;},4096);
             if(control->pending())throw std::runtime_error("Control response too large");
             auto r=Json::parse(response);const auto token=r.at("generation").get<uint64_t>();
+            if(r.contains("telephone_line")){
+                const auto lines=r.at("telephone_line").get<std::array<bool,2>>();
+                applyTelephoneLine(lines.at(unsigned(config.side)),now);
+            }
             if(generation&&generation!=token){
                 if(!peerClosed||token!=generation+1||r.value("closed",false))throw std::runtime_error("Unexpected peer generation change");
                 peer=false;peerEnding=peerClosed=peerDialing=false;answering=ring=false;clockReady=needStep=sample=false;
@@ -307,7 +381,7 @@ struct FrontendModem::Impl {
             // A pending remote call must survive receiver initialization and FIFO
             // clears. Do not interleave RING with an AT reply/partial command.
             // Repeat on guest time until original ATA; never synthesize an answer.
-            if(state==1&&caller<2&&unsigned(config.side)!=caller&&!answering&&!peer&&!session->carrier()&&
+            if(telephoneLineConnected&&state==1&&caller<2&&unsigned(config.side)!=caller&&!answering&&!peer&&!session->carrier()&&
                session->state()==ModemCommandSession::State::command&&session->command().empty()&&
                bank.rx.empty()&&(!ring||frame>=nextRingFrame)){
                 if(!reply("\r\nRING\r\n"))throw std::runtime_error("RING overflow");
@@ -315,7 +389,7 @@ struct FrontendModem::Impl {
                 if(trace)std::fprintf(stderr,"XBAND_RING side=%d frame=%u generation=%llu\n",config.side,frame,
                     static_cast<unsigned long long>(generation));
             }
-            if(state==2&&!peer&&!peerEnding&&!peerClosed){
+            if(telephoneLineConnected&&state==2&&!peer&&!peerEnding&&!peerClosed){
                 if(session->carrier())throw std::runtime_error("Service carrier active at peer handoff");
                 bank.rx.clear();peerUart.reset();peer=true;clockReady=false;
                 if(!session->connected(peerSessionTicket,frame))throw std::runtime_error("Peer CONNECT without pending dial/answer");
@@ -374,6 +448,12 @@ struct FrontendModem::Impl {
     }
     bool pump(){
         try{
+            if(failed){
+                std::optional<Config> restart;
+                {std::lock_guard lock(mutex);restart=std::move(requested);requested.reset();}
+                if(restart)start(std::move(*restart));
+                else{if(enabled&&interruptCode()!=1)saturn->SCU.TriggerExternalInterrupt(12);publish();return true;}
+            }
             // Persist card changes before releasing any queued service response.
             // No filesystem calls occur from mapped register callbacks.
             saveCard();
@@ -389,20 +469,49 @@ struct FrontendModem::Impl {
             std::optional<Config> next;{std::lock_guard lock(mutex);next=std::move(requested);requested.reset();}
             if(next)start(std::move(*next));
             if(!enabled)return true;
+            finishResetButtonCall();
             const auto now=GetTickCount64();
-            const bool serviceOK=service->step(now),controlOK=control->step(now);
-            if(!serviceOK||!controlOK){
-                std::fprintf(stderr,"XBAND_TRANSPORT_FAILURE side=%d frame=%u service_ok=%d control_ok=%d service_reason=%d control_reason=%d service_failure=%d service_state=%d control_failure=%d control_state=%d\n",
-                    config.side,frame,int(serviceOK),int(controlOK),int(service->transportFailure()),int(control->transportFailure()),
-                    int(service->failure()),int(service->failureState()),int(control->failure()),int(control->failureState()));
-                // A local protocol/deadline fault is not proof the server died.
-                // Preserve which channel failed without exposing payloads/keys.
-                std::string reason;
-                if(!serviceOK)reason="Service channel failed: "+std::string(service->failureName());
-                if(!controlOK){if(!reason.empty())reason+="; ";reason+="Control channel failed: "+std::string(control->failureName());}
-                reason+="; reconnect required";
-                throw std::runtime_error(reason);
+            if(now<controlRetryAt){session->tick(frame);
+                if(interruptCode()!=1)saturn->SCU.TriggerExternalInterrupt(12);
+                publish();return true;}
+            if(!control->step(now)){
+                if(control->failure()!=Client::Failure::transport||
+                   (control->transportFailure()!=windows::TcpClient::Failure::io&&
+                    control->transportFailure()!=windows::TcpClient::Failure::connect_timeout))
+                    throw std::runtime_error("Invalid control transport; reconnect required");
+                dropTelephoneCall();generation=0;caller=2;joined=false;peerClosed=peerEnding=false;
+                peerSessionTicket=0;elapsed=end=origin=0;nextRingFrame=0;
+                peerSent=peerReceived=asyncPollDue=asyncSequence=0;
+                controlBusy=false;pending={{"op","join"}};
+                if(asynchronous)pending["transport"]="async-v1";
+                if(standbyExperiment)pending["standby_protocol"]="xband-readonly-v1";
+                control=std::make_unique<Client>(windows::ClientConfig{
+                    config.address,uint16_t(config.port+4+config.side),config.allowLAN,"call-"+std::to_string(config.side),std::string(64,'a'),60},now);
+                controlRetryAt=now+250;
+                status="通信が切断されました。ゲーム画面から再接続してください";
+                if(interruptCode()!=1)saturn->SCU.TriggerExternalInterrupt(12);
+                publish();return true;
             }
+            // Management reports OFF even when the telephone socket has just
+            // closed. Never turn a deliberate line cut into modem power-off.
+            pollControl(now);
+            if(!telephoneLineConnected){
+                session->tick(frame);
+                if(interruptCode()!=1)saturn->SCU.TriggerExternalInterrupt(12);
+                publish();return true;
+            }
+            if(service&&!service->step(now)){
+                if(!serviceFailureSince)serviceFailureSince=now;
+                if(now-serviceFailureSince<2000){publish();return true;}
+                dropTelephoneCall();serviceFailureSince=0;
+                status="通信が切断されました。ゲーム画面から再接続してください";
+                if(interruptCode()!=1)saturn->SCU.TriggerExternalInterrupt(12);
+                publish();return true;
+            }
+            serviceFailureSince=0;
+            if(!service){closeService=false;session->tick(frame);
+                if(interruptCode()!=1)saturn->SCU.TriggerExternalInterrupt(12);
+                publish();return true;}
             if(closeService){
                 if(!service->requestClose(now))throw std::runtime_error("Service close failed; reconnect required");
                 serviceBatch=false;
@@ -428,7 +537,6 @@ struct FrontendModem::Impl {
                 buffer.transmitted();serviceFrame=frame;serviceBatch=true;
             }
             tickPeer();
-            pollControl(now);
             if(interruptCode()!=1)saturn->SCU.TriggerExternalInterrupt(12);
             publish();
             traceState();
@@ -437,7 +545,8 @@ struct FrontendModem::Impl {
         }catch(const std::exception &e){fail(e.what());return true;}
     }
     uint64_t budget(uint64_t cycle,uint64_t rev)noexcept{
-        if(!enabled)return ~uint64_t{0};
+        if(!enabled||failed)return ~uint64_t{0};
+        try{finishResetButtonCall();}catch(const std::exception& e){fail(e.what());return ~uint64_t{0};}
         if(!timelineKnown){timelineKnown=true;timeline=rev;}
         else if(timeline!=rev){fail("Guest reset/load-state: restart server pair and reconnect");return ~uint64_t{0};}
         if(!peer)return ~uint64_t{0};
@@ -489,9 +598,9 @@ bool FrontendModem::hasPendingRequest()const{
 }
 bool FrontendModem::pump(){return impl->pump();}
 void FrontendModem::waitForActivity(){
-    if(!impl->enabled||!impl->service||!impl->control)return;
+    if(!impl->enabled||!impl->control)return;
     fd_set readable,writable;FD_ZERO(&readable);FD_ZERO(&writable);
-    const bool serviceWait=impl->service->appendWaitSockets(readable,writable);
+    const bool serviceWait=!impl->service||impl->service->appendWaitSockets(readable,writable);
     const bool controlWait=impl->control->appendWaitSockets(readable,writable);
     if(serviceWait&&controlWait&&(readable.fd_count||writable.fd_count)){
         timeval timeout{0,1000};
@@ -511,6 +620,32 @@ void FrontendModem::reset(const char*r){
     {std::lock_guard lock(impl->mutex);impl->requested.reset();impl->requestedCardInsertion.reset();impl->requestedCardImage.reset();}
     impl->card.resetPins(); // Never rewind persistent card bytes with guest state.
     if(impl->enabled)impl->stop(r);
+}
+void FrontendModem::softReset(){
+    {std::lock_guard lock(impl->mutex);impl->requested.reset();impl->requestedCardInsertion.reset();impl->requestedCardImage.reset();}
+    impl->card.resetPins(); // Persistent card bytes must not be rewound.
+    if(!impl->enabled)return;
+    const auto config=impl->config;
+    const bool connected=impl->telephoneLineConnected;
+    try{
+        impl->saveCard();impl->saveFlash();
+        // Discard the old UART/session/tickets. Fresh internal registration
+        // does not dial, replay a service request, or resume the old match.
+        impl->start(config);
+        if(!connected)impl->applyTelephoneLine(false,GetTickCount64());
+        impl->publish();
+    }catch(const std::exception& e){impl->fail(e.what());}
+}
+void FrontendModem::hardReset(){softReset();}
+void FrontendModem::consoleResetButton(bool pressed){
+    if(pressed&&!impl->resetButtonPressed&&impl->enabled&&impl->peer&&impl->session){
+        impl->resetButtonArmed=true;impl->resetBoardProbe=false;
+        impl->resetButtonTicket=impl->session->ticket();
+        impl->resetButtonSoftResets=impl->saturn->GetResetDiagnostics().softResets;
+        if(impl->trace)std::fprintf(stderr,"XBAND_RESET_BUTTON_ARM side=%d generation=%llu frame=%u\n",
+            impl->config.side,static_cast<unsigned long long>(impl->generation),impl->frame);
+    }
+    impl->resetButtonPressed=pressed;
 }
 void FrontendModem::shutdown(){
     impl->saveFlash();
