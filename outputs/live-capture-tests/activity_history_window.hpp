@@ -61,7 +61,7 @@ inline std::wstring creditTrialDetail(const nlohmann::json& row){
     const auto scope=row.value("credit_trial_scope",std::string{});
     const std::wstring title=scope=="automatic-match-settlement"?L"対戦分と今回接続の自動精算":scope=="automatic-mail-access"?L"メール接続の自動消費":scope=="reviewed-reset-one-shot"?L"確認済みリセットの一回限り精算":
         scope=="manual-one-shot"?L"手動度数試験":L"度数試験（旧記録・種別未記録）";
-    return L"\r\n"+title+((scope=="automatic-mail-access"||scope=="automatic-match-settlement")?L"（明示的に有効化したサーバー方針）":L"（通常の自動課金ではありません）")+L"　セッション: "+value("credit_trial_session")+
+    return L"\r\n"+(scope=="automatic-mail-send"?std::wstring(L"メール送信通数の自動消費"):title)+((scope=="automatic-mail-send"||scope=="automatic-mail-access"||scope=="automatic-match-settlement")?L"（明示的に有効化したサーバー方針）":L"（通常の自動課金ではありません）")+L"　セッション: "+value("credit_trial_session")+
         L"\r\n要求度数: "+value("requested_credits")+L"　ゲームDISC(ROM)消費実績: "+value("consumed_credits")+
         L"\r\n接続時残度数: "+value("credits_before")+L"　消費後残度数: "+value("remaining_credits")+
         L"\r\n精算エピソード: "+(row.contains("credit_episode")?rankingWide(row.at("credit_episode").get<std::string>()):L"未記録")+

@@ -1,4 +1,7 @@
 #pragma once
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include "diagnostic_outgoing_request.hpp"
 #include "diagnostic_mail_forward.hpp"
 #include "diagnostic_mail_date.hpp"
@@ -34,6 +37,9 @@ class LocalMailJournal {
     using Key=MailAccountKey;
     std::map<Key,std::vector<uint8_t>> names;
     std::map<Key,Key> phoneAccounts;
+    // Current registered terminal for each of the two local modem endpoints.
+    // Keep historical names for audit/source metadata, not as live recipients.
+    std::map<unsigned,std::string> currentTerminals;
     struct MailboxReport { size_t reported=0,prepared=0,remaining=0; };
     mutable std::map<Key,MailboxReport> mailboxReports;
     static J read(const std::filesystem::path& path){
@@ -76,6 +82,7 @@ class LocalMailJournal {
         const auto key=mailAccountKey(raw);
         names[key]=name; // Same terminal/slot may rename; other slots are untouched.
         phoneAccounts[{xband::phoneDigits(j.at("phone").get<std::string>()),key.second}]=key;
+        currentTerminals[j.at("side").get<unsigned>()]=key.first;
     }
     std::vector<std::filesystem::path> files()const{
         std::vector<std::filesystem::path> list;
@@ -108,8 +115,12 @@ class LocalMailJournal {
     }
     std::optional<Key> target(std::span<const uint8_t> name)const{
         std::optional<Key> result;
-        for(const auto& [key,value]:names)if(std::equal(value.begin(),value.end(),name.begin(),name.end())){
-            if(result)return {};result=key;
+        for(const auto& [key,value]:names){
+            const bool current=std::any_of(currentTerminals.begin(),currentTerminals.end(),
+                [&](const auto& endpoint){return endpoint.second==key.first;});
+            if(current&&std::equal(value.begin(),value.end(),name.begin(),name.end())){
+                if(result)return {};result=key; // Genuine current duplicates remain ambiguous.
+            }
         }
         return result;
     }
@@ -171,11 +182,22 @@ public:
             size_t offered=0;for(const auto& [key,state]:offerStates)if(key.starts_with(prefix))++offered;
             row["prepared_accounts"]=offered;rows.push_back(std::move(row));}return rows;
     }
-    uint64_t append(const LocalTCPProbe::Bytes& raw,unsigned side){
+    uint64_t append(const LocalTCPProbe::Bytes& raw,unsigned side,const std::string& sendBatch={}){
         std::lock_guard lock(mutex);
         const auto code=LocalTCPProbe::serviceRequestCode(raw);
         if(side>1||(code!=2&&code!=3&&code!=4))throw std::invalid_argument("Journal requires complete mail/match request");
         const auto records=decodeObservedOutgoingRequest(raw,false,true);
+        if(!sendBatch.empty()){
+            if(sendBatch.size()>256||records.empty())throw std::invalid_argument("Invalid paid mail batch");
+            for(const auto& file:files()){
+                const auto previous=read(file);
+                if(previous.value("send_batch",std::string{})!=sendBatch)continue;
+                const auto old=previous.at("request").get<LocalTCPProbe::Bytes>();
+                if(mailAccountKey(old).first!=mailAccountKey(raw).first||outgoingMailBatch(old)!=outgoingMailBatch(raw))
+                    throw std::runtime_error("Paid mail batch/journal conflict");
+                return previous.at("id").get<uint64_t>(); // No duplicate delivery entry.
+            }
+        }
         const auto profile=raw[xband::registrationOffset(raw,43)];if(profile>3)throw std::invalid_argument("Invalid journal profile");
         (void)currentName(raw);if(next==UINT64_MAX)throw std::runtime_error("Journal ID exhausted");
         const auto current=mailAccountKey(raw);const auto name=currentName(raw);
@@ -196,6 +218,7 @@ public:
         J j{{"version",1},{"id",next},{"side",side},{"phone",xband::registrationPhone(raw)},{"profile",profile},
             {"accepted_unix_ms",std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count()},
             {"request",raw},{"mails",mails},{"delivery_confirmed",false}};
+        if(!sendBatch.empty())j["send_batch"]=sendBatch;
         const auto bytes=j.dump();std::ostringstream filename;filename<<std::setw(20)<<std::setfill('0')<<next<<".json";
         const auto target=root/filename.str();auto pending=target;pending+=L".pending";
         const HANDLE file=CreateFileW(pending.c_str(),GENERIC_WRITE,0,nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,nullptr);

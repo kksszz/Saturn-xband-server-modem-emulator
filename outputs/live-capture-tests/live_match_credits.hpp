@@ -222,7 +222,8 @@ public:
             if(updated.at("value")!=card.value||updated.at("raw")!=J(*card.raw))return {Plan::State::Blocked,key,debitKey};
             // A native-confirmed debit cannot be sent again after a crash
             // between the debit ledger and the match ledger commits. This
-            // recovery access only synchronizes the receipt; no extra mail49.
+            // recovery synchronizes the receipt; the caller handles any new
+            // uncharged outgoing letters separately, never repeats this49.
             const bool full=ledger.at(debitKey).at("state")=="confirmed";
             participant["paid"]=full;participant["settled"]=true;
             participant["settlement_state"]=full?"confirmed":"exhausted";
@@ -240,11 +241,12 @@ public:
         else{resolve(row);if(next!=file)commit(next);}
         if(!row.contains("fees")||row.at("fees").at(side).is_null())return defer("result-unclassified");
         if(!participant.at("claim").is_null())return {Plan::State::Ready,key,debitKey,participant.at("claim").at("amount").get<unsigned>(),participant.at("claim").at("mail_denied").get<bool>()};
-        const bool mailCall=LocalTCPProbe::serviceRequestCode(request,true)==4;
         const unsigned matchUnits=row.at("fees").at(side).get<unsigned>();
         // A request may exceed the finite balance. Keep the full match request
         // and let the verified native reply record the partial actual debit.
-        const unsigned mail=mailEnabled&&mailCall?mailUnits:0;
+        // Caller supplies the actual uncharged outgoing-letter total, not
+        // a connection fee. Letters can accompany any supported service code.
+        const unsigned mail=mailEnabled?mailUnits:0;
         const bool denied=uint64_t(card.value)<uint64_t(matchUnits)+mail;
         const unsigned amount=matchUnits+(denied?0:mail);
         if(amount>32767)return {Plan::State::Blocked,key,debitKey};

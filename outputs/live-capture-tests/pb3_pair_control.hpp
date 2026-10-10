@@ -3,6 +3,7 @@
 #include <xband/async_modem_link.hpp>
 #include <xband/local_match_roles.hpp>
 #include <xband/standby_registration.hpp>
+#include <xband/media_card_control.hpp>
 #include <nlohmann/json.hpp>
 #include <array>
 #include <deque>
@@ -18,10 +19,15 @@
 struct PB3TimeAdmissionDenied final:std::runtime_error {
     PB3TimeAdmissionDenied():std::runtime_error("Match request outside allowed JST window"){}
 };
+struct PB3CardAdmissionDenied final:std::runtime_error {
+    xband::CardMatchAdmission reason;
+    explicit PB3CardAdmissionDenied(xband::CardMatchAdmission r):std::runtime_error("Match card unavailable"),reason(r){}
+};
 struct PB3PairControl {
     std::shared_ptr<xband::LocalMatchRoles> roles=std::make_shared<xband::LocalMatchRoles>();
     std::array<bool,2> joined{},finished{};
     std::array<bool,2> telephoneLine{true,true}; // Independent of modem power/card; volatile per server session.
+    std::array<xband::MediaCardControl,2> mediaCards;
     void setTelephoneLine(unsigned side,bool connected){
         if(side>1)throw std::invalid_argument("Invalid telephone line side");
         if(telephoneLine[side]==connected)return;
@@ -73,6 +79,7 @@ struct PB3PairControl {
     void enforceAdmission(){
         // A connected game may finish. Restrict new routes/carriers, not live
         // game bytes or result reporting, and never mix wall/guest clocks.
+        enforceCardAdmission(GetTickCount64());
         if(!matchAdmission||state==2||closing)return;
         for(unsigned side=0;side<2;++side){
             const auto& e=standby.entry(side);
@@ -86,10 +93,29 @@ struct PB3PairControl {
                 record(side,"time_expired","利用時間外になったため、未成立の待機登録を終了。");}
         }
     }
+    xband::CardMatchAdmission cardAdmission(unsigned side,uint64_t now)const{
+        return mediaCards.at(side).matchAdmission(now).value_or(xband::CardMatchAdmission::allowed);
+    }
+    void enforceCardAdmission(uint64_t now){
+        if(state==2||closing)return; // Never terminate an established game on stale telemetry.
+        for(unsigned side=0;side<2;++side){
+            if(cardAdmission(side,now)==xband::CardMatchAdmission::allowed)continue;
+            if(state==1||roles->caller<2){
+                state=0;closing=true;roles->blocked=true;closedAck={};
+                record(side,"card_match_cancelled","対戦開始前にカードが未挿入・残0・確認不能となったため接続世代を終了。");return;
+            }
+            const auto& e=standby.entry(side);
+            if(e){const auto ticket=e->ticket;standby.cancel(side,ticket,0);
+                record(side,"card_wait_cancelled","カードが未挿入・残0・確認不能のため、未成立の待機登録を解除。相手への発信は行いません。");}
+            roles->withdraw(side);
+        }
+    }
     xband::StandbyRegistration::Decision registerStandby(unsigned side,const std::string& phone,uint32_t game,
                                                         const std::string& name={},const std::string& target={}){
         if(side>1)throw std::runtime_error("Invalid standby side");
         enforceAdmission();
+        const auto card=cardAdmission(side,GetTickCount64());
+        if(card!=xband::CardMatchAdmission::allowed)throw PB3CardAdmissionDenied(card);
         if(matchAdmission&&!matchAdmission(phone))throw PB3TimeAdmissionDenied{};
         // A new service login can race the old carrier-loss acknowledgements.
         // Wait for generation renewal rather than killing its transport.
@@ -193,7 +219,11 @@ public:
             pair->standbyCapable[side]=pair->standbyProtocols[side]=="xband-readonly-v1"||
                 pair->standbyProtocols[side]=="vf-readonly-v1";
             pair->activityContext[side]=nlohmann::json::object();pair->record(side,"terminal_join");
+            pair->mediaCards[side].invalidate(); // A replacement frontend never inherits queued insertion commands.
         }
+        if(request.contains("media_card"))pair->mediaCards[side].observe(request.at("media_card"),GetTickCount64());
+        pair->enforceAdmission(); // Recheck this request's fresh report before publishing roles/carrier.
+        if(pair->closing&&op!="closed_ack"&&used)op="poll";
         std::vector<uint8_t> received;
         if(op=="standby_ready"||op=="standby_cancel"){
             if(!pair->standbyEnabled||!pair->standbyCapable[side]||!request.contains("generation")||
@@ -274,6 +304,7 @@ public:
         auto responseValue=nlohmann::json{{"state",pair->state},{"generation",pair->generation},{"transport",pair->asynchronous?"async-v1":"lockstep"},
             {"closed",pair->failed||pair->closing},{"recoverable",!pair->failed},{"caller",pair->roles->caller},{"callee",pair->roles->callee()},{"joined",pair->joined},{"finished",pair->finished},{"grant_end",pair->grantEnd[side]},
             {"bytes",received},{"telephone_line",pair->telephoneLine}};
+        responseValue["media_card_command"]=pair->mediaCards[side].pending(GetTickCount64());
         if(pair->standbyEnabled&&pair->standbyCapable[side]){
             const auto& e=pair->standby.entry(side);
             responseValue["standby"]={{"protocol",pair->standbyProtocols[side]},{"ticket",e?e->ticket:0},
@@ -288,6 +319,7 @@ public:
     void reset()override{
         input.clear();output.clear();
         if(!used)return;
+        pair->mediaCards[side].invalidate();
         if(pair->state==2&&pair->creditCarrierEnded)pair->creditCarrierEnded();
         pair->record(side,"terminal_leave",pair->state==2?"Transport left during peer connection":"Control transport disconnected");
         if(pair->standbyEnabled){

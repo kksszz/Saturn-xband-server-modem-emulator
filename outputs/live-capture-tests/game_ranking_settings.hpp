@@ -164,7 +164,11 @@ public:
         if(!id)return {};
         auto values=snapshot();auto it=std::find_if(values.begin(),values.end(),[&](const auto&r){return r.gameID==*id;});
         if(it==values.end())return {};
-        const auto text=rankingEUC(it->fields[0]);const auto n=text.size()+1;
+        // Only the opponent-introduction resource uses this historical short
+        // label. Ranking fields, saved settings and custom names stay unchanged.
+        const auto label=(*id==0x00010003&&it->fields[0]==rankingUTF8(L"Virtua Fighter\u2122 Remix"))
+            ?rankingUTF8(L"VF\u2122 Remix"):it->fields[0];
+        const auto text=rankingEUC(label);const auto n=text.size()+1;
         std::vector<uint8_t> out{0x32,0,0x8b,uint8_t(n>>24),uint8_t(n>>16),uint8_t(n>>8),uint8_t(n)};
         out.insert(out.end(),text.begin(),text.end());out.push_back(0);return out;
     }

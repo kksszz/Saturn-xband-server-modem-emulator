@@ -9,6 +9,7 @@
 #include <xband/xos_standby_observer.hpp>
 #include <xband/peer_dial_gate.hpp>
 #include <xband/virtual_media_card.hpp>
+#include <xband/media_card_control.hpp>
 #include "board_attachment.hpp"
 #include "flash_storage.hpp"
 #include <ymir/sys/saturn.hpp>
@@ -26,6 +27,7 @@ struct FrontendModem::Impl {
     mutable std::mutex mutex;
     std::optional<Config> requested;
     std::optional<bool> requestedCardInsertion;
+    std::optional<bool> requestedCardReadFault;
     std::optional<std::filesystem::path> requestedCardImage;
     Snapshot published;
     Config config;
@@ -35,6 +37,42 @@ struct FrontendModem::Impl {
     std::unique_ptr<VirtualCardStorage> cardStorage;
     VirtualMediaCard card;
     bool cardSaveFailed=false;
+    std::string cardCommandToken;
+    std::string cardCommandError;
+    std::optional<unsigned> cardReinsertFrame;
+    bool canReplaceCard()const{
+        return !cardSaveFailed&&!cardReinsertFrame;
+    }
+    void replaceCard(const std::filesystem::path& path){
+        if(!canReplaceCard())throw std::runtime_error("Card persistence failed or replacement is pending");
+        saveCard();
+        auto next=std::make_unique<VirtualCardStorage>(path);
+        if(!next->loaded())throw std::runtime_error("Existing13-byte card required");
+        VirtualMediaCard candidate;candidate.data=*next->loaded();
+        if(!candidate.remainingUnits())throw std::runtime_error("Unreadable replacement card");
+        const bool inserted=card.present;
+        card.setInserted(false);card=candidate;cardStorage=std::move(next);
+        // Keep the modem/call powered and expose an actual card-OFF interval
+        // to the guest before reinserting the new card on a later frame.
+        if(inserted)cardReinsertFrame=frame;
+        cardCommandError.clear();publish();
+    }
+    Json cardReport()const{
+        const auto units=cardStorage&&!cardSaveFailed?card.remainingUnits():std::nullopt;
+        return {{"version",1},{"configured",bool(cardStorage)},{"inserted",card.present},
+            {"save_failed",cardSaveFailed},{"read_fault",card.readFault},{"units",units?Json(*units):Json(nullptr)},{"command_token",cardCommandToken},
+            {"replace_supported",true},{"can_replace",canReplaceCard()},{"command_error",cardCommandError}};
+    }
+    void setCardInsertion(bool inserted){
+        if(!cardStorage||cardSaveFailed)throw std::runtime_error("Virtual card unavailable");
+        saveCard(); // Flush changes before removal; same path as the local UI.
+        cardReinsertFrame.reset();if(card.present!=inserted)card.setInserted(inserted);
+        publish();
+    }
+    void setCardReadFault(bool fault){
+        if(!cardStorage||cardSaveFailed)throw std::runtime_error("Virtual card unavailable");
+        saveCard();card.setReadFault(fault);publish();
+    }
     void loadCard(const std::filesystem::path &path){
         if(cardStorage||enabled)throw std::runtime_error("Load virtual card once while modem is disconnected");
         auto storage=std::make_unique<VirtualCardStorage>(path);
@@ -133,7 +171,7 @@ struct FrontendModem::Impl {
         }
         return localDialRole(number,config.side,serviceBegun);
     }
-    void publish(){std::lock_guard lock(mutex);published={enabled,peer||(session&&session->carrier()),frame,sent,received,status,bool(cardStorage),card.present,telephoneLineConnected};}
+    void publish(){std::lock_guard lock(mutex);published={enabled,peer||(session&&session->carrier()),frame,sent,received,status,bool(cardStorage),card.present,telephoneLineConnected,cardStorage&&!cardSaveFailed?card.remainingUnits():std::nullopt,cardSaveFailed,card.readFault};}
     std::unique_ptr<Client> serviceConnection(uint64_t now){
         return std::make_unique<Client>(windows::ClientConfig{
             config.address,uint16_t(config.port+config.side),config.allowLAN,"pb3-"+std::to_string(config.side),std::string(64,'a'),60},now);
@@ -323,6 +361,18 @@ struct FrontendModem::Impl {
             std::string response;control->drain([&](uint8_t b){if(response.size()==4096)return false;response+=char(b);return true;},4096);
             if(control->pending())throw std::runtime_error("Control response too large");
             auto r=Json::parse(response);const auto token=r.at("generation").get<uint64_t>();
+            if(r.contains("media_card_command")&&!r.at("media_card_command").is_null()){
+                const auto& command=r.at("media_card_command");const auto id=MediaCardControl::validateCommand(command);
+                if(id!=cardCommandToken){
+                    try{
+                        if(command.contains("image_path"))replaceCard(std::filesystem::u8path(command.at("image_path").get<std::string>()));
+                        else{setCardInsertion(command.at("inserted").get<bool>());
+                            if(command.contains("read_fault"))setCardReadFault(command.at("read_fault").get<bool>());}
+                        cardCommandError.clear();
+                    }catch(const std::exception& e){cardCommandError=e.what();}
+                    cardCommandToken=id;
+                }
+            }
             if(r.contains("telephone_line")){
                 const auto lines=r.at("telephone_line").get<std::array<bool,2>>();
                 applyTelephoneLine(lines.at(unsigned(config.side)),now);
@@ -420,6 +470,7 @@ struct FrontendModem::Impl {
                 pending={{"op","step"},{"generation",generation},{"elapsed",elapsed},{"bytes",peerTX}};
             }
         }
+        pending["media_card"]=cardReport();
         const auto wire=pending.dump();
         if(!control->transfer(std::span(reinterpret_cast<const uint8_t*>(wire.data()),wire.size()),++controlTick))throw std::runtime_error("Control transfer rejected");
         pending={{"op","poll"}};controlBusy=true;if(peer){peerTX.clear();needStep=false;}
@@ -457,15 +508,21 @@ struct FrontendModem::Impl {
             // Persist card changes before releasing any queued service response.
             // No filesystem calls occur from mapped register callbacks.
             saveCard();
+            if(cardReinsertFrame&&frame!=*cardReinsertFrame){
+                card.setInserted(true);cardReinsertFrame.reset();publish();
+            }
             std::optional<bool> insertion;
+            std::optional<bool> readFault;
             std::optional<std::filesystem::path> image;
             {std::lock_guard lock(mutex);insertion=requestedCardInsertion;requestedCardInsertion.reset();
+             readFault=requestedCardReadFault;requestedCardReadFault.reset();
              image=std::move(requestedCardImage);requestedCardImage.reset();}
-            if(image)loadCard(*image);
+            if(image){try{if(cardStorage)replaceCard(*image);else loadCard(*image);cardCommandError.clear();}
+                catch(const std::exception& e){cardCommandError=e.what();publish();}}
             if(insertion){
-                if(!cardStorage||cardSaveFailed)throw std::runtime_error("Virtual card unavailable");
-                card.setInserted(*insertion);publish();
+                setCardInsertion(*insertion);
             }
+            if(readFault)setCardReadFault(*readFault);
             std::optional<Config> next;{std::lock_guard lock(mutex);next=std::move(requested);requested.reset();}
             if(next)start(std::move(*next));
             if(!enabled)return true;
@@ -590,11 +647,14 @@ void FrontendModem::requestCardImage(std::filesystem::path path){
 void FrontendModem::requestCardInsertion(bool inserted){
     std::lock_guard lock(impl->mutex);impl->requestedCardInsertion=inserted;
 }
+void FrontendModem::requestCardReadFault(bool fault){
+    std::lock_guard lock(impl->mutex);impl->requestedCardReadFault=fault;
+}
 void FrontendModem::request(Config c){std::lock_guard lock(impl->mutex);impl->requested=std::move(c);}
 FrontendModem::Snapshot FrontendModem::snapshot()const{std::lock_guard lock(impl->mutex);return impl->published;}
 bool FrontendModem::hasPendingRequest()const{
     std::lock_guard lock(impl->mutex);
-    return impl->requested.has_value()||impl->requestedCardInsertion.has_value()||impl->requestedCardImage.has_value();
+    return impl->requested.has_value()||impl->requestedCardInsertion.has_value()||impl->requestedCardReadFault.has_value()||impl->requestedCardImage.has_value();
 }
 bool FrontendModem::pump(){return impl->pump();}
 void FrontendModem::waitForActivity(){
@@ -617,12 +677,12 @@ void FrontendModem::frameCompleted(){
 uint64_t FrontendModem::budget(uint64_t c,uint64_t r)noexcept{return impl->budget(c,r);}
 void FrontendModem::reset(const char*r){
     // A queued UI connect must not resurrect a pre-rewind network session.
-    {std::lock_guard lock(impl->mutex);impl->requested.reset();impl->requestedCardInsertion.reset();impl->requestedCardImage.reset();}
+    {std::lock_guard lock(impl->mutex);impl->requested.reset();impl->requestedCardInsertion.reset();impl->requestedCardReadFault.reset();impl->requestedCardImage.reset();}
     impl->card.resetPins(); // Never rewind persistent card bytes with guest state.
     if(impl->enabled)impl->stop(r);
 }
 void FrontendModem::softReset(){
-    {std::lock_guard lock(impl->mutex);impl->requested.reset();impl->requestedCardInsertion.reset();impl->requestedCardImage.reset();}
+    {std::lock_guard lock(impl->mutex);impl->requested.reset();impl->requestedCardInsertion.reset();impl->requestedCardReadFault.reset();impl->requestedCardImage.reset();}
     impl->card.resetPins(); // Persistent card bytes must not be rewound.
     if(!impl->enabled)return;
     const auto config=impl->config;

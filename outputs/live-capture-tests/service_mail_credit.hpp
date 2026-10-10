@@ -4,7 +4,9 @@
 #include <memory>
 
 namespace diagnostic {
-// Explicit server-local mail-access policy. This is not an outcome classifier,
+// Native debit exchange for a durably identified outgoing batch/match. The
+// caller computes per-letter fees; this exchange never bills a connection.
+// This is not an outcome classifier,
 // retry scheduler, refund handler, or a reconstruction of historical timing.
 class ServiceMailCredit:public std::enable_shared_from_this<ServiceMailCredit>{
     std::shared_ptr<DeferredCreditSettlement> ledger;

@@ -5,7 +5,7 @@ inline constexpr uint32_t standbyWaitTicksPerMinute=3600;
 inline constexpr unsigned standbyWaitMaxMinutes=60;
 struct StandbyWaitValues {
     // Original preference indices: 0 short, 1 normal, 2 long.
-    std::array<unsigned,3> minutes{1,2,4};
+    std::array<unsigned,3> minutes{5,10,12};
     bool operator==(const StandbyWaitValues&)const=default;
 };
 inline void validateStandbyWait(const StandbyWaitValues& value){

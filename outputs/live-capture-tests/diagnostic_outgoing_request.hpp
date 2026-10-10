@@ -1,6 +1,7 @@
 #pragma once
 #include "local_tcp_probe.hpp"
 #include "diagnostic_outgoing_record.hpp"
+#include <nlohmann/json.hpp>
 
 namespace diagnostic {
 // Locate 1D structurally, after the length-delimited registration and resources.
@@ -11,6 +12,9 @@ inline std::vector<ObservedOutgoingRecord> decodeObservedOutgoingRequest(const L
         return decodeObservedOutgoingRequest(named->first,allowObservedPlayer3,serviceJournal);
     if(!LocalTCPProbe::completeMailProbeRequest(request,allowObservedPlayer3))
         throw std::invalid_argument("Incomplete or unsupported service request");
+    // This complete framing proves both 16/1D lists empty, including the
+    // result-only 20 trailer. No payload scan or inferred mail count.
+    if(LocalTCPProbe::completeDiagnosticRequest(request))return {};
     size_t rivalListStart=0,rivalListEnd=0;
     if(LocalTCPProbe::rivalMailListBounds(request,rivalListStart,rivalListEnd))
         return decodeObservedOutgoingList(std::span<const uint8_t>(request).subspan(
@@ -35,5 +39,14 @@ inline std::vector<ObservedOutgoingRecord> decodeObservedOutgoingRequest(const L
     if(request.size()<14||request[request.size()-14]!=0x21||position>request.size()-14)
         throw std::invalid_argument("Unsupported outgoing request trailer");
     return decodeObservedOutgoingList(std::span<const uint8_t>(request).subspan(position,request.size()-14-position),allowObservedPlayer3,serviceJournal);
+}
+// Stable multiset: preserve repeated equal letters and all four source slots,
+// but do not treat request order/card/result/connection changes as new mail.
+inline nlohmann::json outgoingMailBatch(const LocalTCPProbe::Bytes& request){
+    std::vector<nlohmann::json> items;
+    for(const auto& record:decodeObservedOutgoingRequest(request,false,true))
+        items.push_back({{"player",record.prefix[0]},{"fields",record.fields}});
+    std::sort(items.begin(),items.end(),[](const auto& a,const auto& b){return a.dump()<b.dump();});
+    return nlohmann::json(items);
 }
 }

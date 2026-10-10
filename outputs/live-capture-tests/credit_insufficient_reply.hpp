@@ -2,6 +2,27 @@
 #include "game_ranking_settings.hpp"
 #include <optional>
 namespace diagnostic {
+// Newly authored receive0A program, not recovered historical server traffic.
+// Calls the shared Saturn XBAND type0118 display routine. No ROM text/assets
+// are distributed. ABI verified against the VF Remix/Puzzle Bobble 3 engine;
+// other engine revisions have not been verified. Never accept arbitrary code/ID.
+inline std::vector<uint8_t> originalCardWarningReply(uint16_t id){
+    if(id!=0x42&&id!=0x75&&id!=0x107)
+        throw std::runtime_error("Unsupported original card warning");
+    std::vector<uint8_t> body{0,0,0,36,0,0,0,0,
+        0x2f,0xe6,0x4f,0x22,0x6e,0xf3,0x94,0x0b,
+        0xd1,0x03,0x41,0x0b,0,9,0x6f,0xe3,
+        0x4f,0x26,0,0x0b,0x6e,0xf6,0,9,
+        6,2,0x35,0x3c,0,9,0,9,uint8_t(id>>8),uint8_t(id),0,9};
+    uint16_t crc=0xffff;
+    for(auto byte:body){
+        crc^=uint16_t(byte)<<8;
+        for(unsigned bit=0;bit<8;++bit)crc=uint16_t((crc<<1)^((crc&0x8000)?0x1021:0));
+    }
+    std::vector<uint8_t> wire{0x0a,0,uint8_t(crc>>8),uint8_t(crc),0,0,0,uint8_t(body.size())};
+    wire.insert(wire.end(),body.begin(),body.end());wire.push_back(2);
+    return wire;
+}
 inline std::vector<uint8_t> creditNoticeReply(const std::wstring& message){
     if(message.empty()||message.size()>128||message.find(L'\0')!=std::wstring::npos)
         throw std::runtime_error("Invalid bounded credit notice");

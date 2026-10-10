@@ -33,7 +33,10 @@ int main(int argc,char**argv){try{
     if(label(9).find(L"個別精算")==std::wstring::npos||
        label(9).find(L"相手の接続は待ちません")==std::wstring::npos||
        label(9).find(L"全タイトル共通処理")==std::wstring::npos||
-       label(10).find(L"この端末の結果が未確認")==std::wstring::npos)
+       label(10).find(L"未請求の不明対戦は保留")==std::wstring::npos||
+       label(10).find(L"受信は無料")==std::wstring::npos||
+       label(5).find(L"送信通数")==std::wstring::npos||
+       label(8).find(L"実際の送信分だけ加算")==std::wstring::npos)
         throw std::runtime_error("Independent settlement or title-neutral explanation missing");
     wchar_t defaultMail[16]{},defaultMatch[16]{};
     GetWindowTextW(GetDlgItem(w,1),defaultMail,16);GetWindowTextW(GetDlgItem(w,2),defaultMatch,16);
@@ -66,6 +69,8 @@ int main(int argc,char**argv){try{
     SendMessageW(GetDlgItem(w,6),BM_SETCHECK,BST_CHECKED,0);
     SetWindowTextW(GetDlgItem(w,1),L"1");SetWindowTextW(GetDlgItem(w,2),L"3");SendMessageW(w,WM_COMMAND,3,0);
     const auto active=diagnostic::ServiceCreditSettings(path).snapshot();
+    {std::ifstream in(path);const auto j=nlohmann::json::parse(in);
+        if(j.at("schema")!=4||j.at("mail_basis")!="accepted-outgoing-letter")throw std::runtime_error("Per-letter policy not explicit");}
     if(!active.mailEnabled||!active.matchEnabled||active.resetScope!=1||active.includeMail!=1)throw std::runtime_error("Explicit match/UI policy not persisted");
     for(const char* field:{"reset_scope","include_mail"})for(const auto value:{nlohmann::json(0),nlohmann::json(2),nlohmann::json(1.5)}){
         std::ifstream in(path);auto changed=nlohmann::json::parse(in);changed[field]=value;

@@ -1,4 +1,4 @@
-param([string]$Version='v0.3.1')
+param([string]$Version='v0.4.0')
 $ErrorActionPreference='Stop'
 if($Version -notmatch '^v\d+\.\d+\.\d+([.-][a-zA-Z0-9.-]+)?$'){throw 'Invalid release version'}
 $taskStage=Join-Path $PSScriptRoot ('artifacts/'+$Version+'/Saturn-xband-server-modem-emulator-windows-x64')

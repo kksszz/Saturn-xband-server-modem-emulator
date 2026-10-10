@@ -133,6 +133,7 @@ struct LocalTCPProbe {
             }
         }
         if(prepareServiceReply&&!prepareServiceReply())return {};
+        if(!creditDenialReply.empty())return pollCreditDenial(); // Admission may refuse after settlement, before any route/mail reply.
         const Bytes response=applicationReply();
         if(serviceWindow<response.size())return {};
         const auto seqOut=localNext;

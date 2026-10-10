@@ -77,10 +77,23 @@ B initialRequest(unsigned side,unsigned balance,uint32_t game=0x10003){
     const auto raw=LocalTCPProbe::observedGameResult(wire,true);
     check(raw.size()==84&&LocalTCPProbe::longword(raw,12)==0);return wire;
 }
+B withLetters(B wire,unsigned count){
+    size_t start=0,end=0;check(LocalTCPProbe::rivalMailListBounds(wire,start,end)&&end==start+3);
+    B list{0x1d,0,uint8_t(count)};
+    for(unsigned i=0;i<count;++i){
+        list.push_back(uint8_t(i%4));list.insert(list.end(),9,0xff);
+        for(const auto& field:{std::string("DEST"),std::string("TITLE"),std::string("body")+std::to_string(i)}){
+            list.push_back(0);list.push_back(uint8_t(field.size()+1));list.insert(list.end(),field.begin(),field.end());list.push_back(0);}
+        list.insert(list.end(),4,0);
+    }
+    wire.erase(wire.begin()+start,wire.begin()+end);wire.insert(wire.begin()+start,list.begin(),list.end());
+    check(LocalTCPProbe::completeMailProbeRequest(wire)&&diagnostic::outgoingMailBatch(wire).size()==count);return wire;
+}
 struct Fixture{
     std::shared_ptr<diagnostic::ServiceCreditSettings> settings;
     std::shared_ptr<Ledger> ledger;
     std::shared_ptr<Match> matches;
+    std::shared_ptr<diagnostic::LocalMailJournal> journal;
     std::shared_ptr<PB3PairControl> pair=std::make_shared<PB3PairControl>();
     PB3PairControlEndpoint left{pair,0},right{pair,1};
     unsigned balance;
@@ -89,11 +102,15 @@ struct Fixture{
         settings=std::make_shared<diagnostic::ServiceCreditSettings>(dir/"settings.json");
         settings->save(mail,normal,true,enabled);
         ledger=std::make_shared<Ledger>(dir/"debits.json");
+        journal=std::make_shared<diagnostic::LocalMailJournal>(dir/"mail");
         matches=std::make_shared<Match>(dir/"matches.json");
         installLiveMatchCreditHooks(pair,matches,settings);
         control(left,{{"op","join"}});control(right,{{"op","join"}});
         std::array<std::unique_ptr<PB3Service>,2> registrations;
-        for(unsigned side=0;side<2;++side){
+        // Retain settlement regression coverage for an already-existing zero
+        // balance episode. New production requests at zero are now refused.
+        if(balance==0){pair->activityContext=contexts(0,game);pair->roles->accept(0);pair->roles->accept(1);}
+        else for(unsigned side=0;side<2;++side){
             registrations[side]=std::make_unique<PB3Service>(side,std::make_shared<PB3Observation>(),pair->roles,false,false);
             auto& service=*registrations[side];
             service.setServiceCredits(settings,ledger);service.setMatchCredits(matches);
@@ -116,6 +133,7 @@ struct Fixture{
     std::unique_ptr<PB3Service> service(unsigned side,const B& wire){
         auto s=std::make_unique<PB3Service>(side,std::make_shared<PB3Observation>(),pair->roles,false,false);
         s->setServiceCredits(settings,ledger);s->setMatchCredits(matches);
+        s->setLocalMailJournal(journal);
         s->setActivityHistory({},[this,side](const J& c){pair->activityContext[side]=c;return pair->generation;});
         configureProbe(s->testTCP(),wire);return s;
     }
@@ -136,11 +154,46 @@ void nativeDebit(PB3Service& s,unsigned balance,unsigned side,unsigned amount,bo
         !p.creditDenialSent&&p.cardDebitReleased&&prepared==1&&ordinary==1);
     check(p.pollServiceReply().empty()); // Same TCP call never repeats49 or ordinary service.
 }
+void freeAccess(PB3Service& s){
+    auto& p=s.testTCP();const auto packet=p.pollServiceReply();
+    check(!packet.empty()&&packet[40]!=0x49&&!p.creditDenialSent&&
+          p.cardDebit.state==media_card::ServiceDebitExchange::State::Disabled);
+    check(p.pollServiceReply().empty());
+}
 }
 int main(){try{
     const auto root=std::filesystem::temp_directory_path()/("xband-live-integration-"+
         std::to_string(GetCurrentProcessId())+"-"+std::to_string(GetTickCount64()));
     unsigned cases=0;
+    // Crash after native match receipt but before the match marker commit.
+    // Recovery must not erase the cost of newly queued outgoing letters.
+    {
+        Fixture f(root/"recovered-match-new-mail",10);f.end();
+        const auto wire=request(0,10);
+        const auto plan=f.matches->observeAndPlan(0,wire,0,true,*f.ledger);
+        check(plan.amount==3);
+        const auto owner=xband::registrationPhone(wire);
+        f.ledger->queue(plan.debitKey,owner,3,card(10,0),true);
+        check(!f.ledger->issue(plan.debitKey,"before-crash",card(10,0)).empty());
+        check(f.ledger->acknowledge(plan.debitKey,"before-crash",reply(3,card(10,0))));
+        check(!f.matches->snapshot().at("match/1").at("participants").at(0).at("settled").get<bool>());
+        auto s=f.service(0,withLetters(request(0,7),2));unsigned prep=0,ordinary=0;
+        nativeDebit(*s,7,0,2,false,prep,ordinary);
+        check(f.ledger->snapshot().at(plan.debitKey).at("consumed")==3&&f.journal->summary().at("mails")==2);
+        check(f.matches->snapshot().at("match/1").at("participants").at(0).at("paid").get<bool>());++cases;
+    }
+    // Actual outgoing batches are billed per letter and can accompany a
+    // match settlement. The same batch on reconnect is never recharged.
+    for(uint32_t game:{0x10003u,0x10005u,0xdeadbeefu})for(bool reset:{false,true}){
+        Fixture f(root/("with-mail-"+std::to_string(game)+"-"+std::to_string(reset)),20,true,game);f.end();
+        const auto wire=withLetters(request(0,20,game,reset?-608:0),2);
+        auto s=f.service(0,wire);unsigned prep=0,ordinary=0;
+        const unsigned total=(reset?1:3)+2;nativeDebit(*s,20,0,total,false,prep,ordinary);
+        const auto receipt=f.ledger->snapshot().at("match/1/side:0");check(receipt.at("consumed")==total&&f.journal->summary().at("mails")==2);
+        s.reset();f.ledger=std::make_shared<Ledger>(root/("with-mail-"+std::to_string(game)+"-"+std::to_string(reset))/"debits.json");
+        auto again=f.service(0,withLetters(request(0,20-total,game,reset?-608:0),2));freeAccess(*again);
+        check(f.ledger->snapshot().at("match/1/side:0")==receipt&&f.journal->summary().at("mails")==2);++cases;
+    }
     for(bool reset:{false,true})for(unsigned balance:{0u,1u,2u,3u,4u,10u}){
         Fixture f(root/(std::string(reset?"reset-":"normal-")+std::to_string(balance)),balance);
         check(f.matches->snapshot().at("match/1").at("participants").at(0).at("card").at("value")==balance);
@@ -149,8 +202,8 @@ int main(){try{
         const auto rightWire=request(1,balance,0x10003,reset?-609:0,false);
         // Each side consumes on its FIRST access, before the peer reports.
         // No manual consume/continue UI and no extra reconnect.
-        const unsigned match=reset?1:3,amount=match+(balance>=match+1?1:0);
-        const bool denied=balance<match+1;
+        const unsigned match=reset?1:3,amount=match; // Empty outbox: no connection charge.
+        const bool denied=balance<match;
         for(unsigned side:{0u,1u}){
             auto s=f.service(side,side?rightWire:leftWire);unsigned prep=0,ordinary=0;
             nativeDebit(*s,balance,side,amount,denied,prep,ordinary);
@@ -179,7 +232,7 @@ int main(){try{
         Fixture f(root/("common-"+std::to_string(game)+"-"+std::to_string(first)+"-"+std::to_string(reset)),
             20,true,game,7,2);
         f.end();
-        const unsigned amount=reset?3:9; // reset1/normal7 plus common mail2.
+        const unsigned amount=reset?1:7; // Empty outbox, regardless of mail unit setting.
         for(unsigned side:{first,1-first}){
             auto s=f.service(side,request(side,20,game,reset?(side?-609:-608):0,side==0));
             unsigned prep=0,ordinary=0;nativeDebit(*s,20,side,amount,false,prep,ordinary);
@@ -198,34 +251,33 @@ int main(){try{
     for(unsigned first:{0u,1u})for(bool unknown:{false,true}){
         Fixture f(root/("independent-first-"+std::to_string(first)+"-"+std::to_string(unknown)),100);f.end();
         auto s=f.service(first,request(first,100));unsigned prep=0,ordinary=0;
-        nativeDebit(*s,100,first,4,false,prep,ordinary);
+        nativeDebit(*s,100,first,3,false,prep,ordinary);
         const auto key="match/1/side:"+std::to_string(first);
         const auto receipt=f.ledger->snapshot().at(key);
-        check(receipt.at("updated_card").at("value")==96&&f.ledger->snapshot().size()==1);
+        check(receipt.at("updated_card").at("value")==97&&f.ledger->snapshot().size()==1);
         check(f.matches->snapshot().at("match/1").at("reports").at(1-first).is_null());
         f.matches=std::make_shared<Match>(root/("independent-first-"+std::to_string(first)+"-"+std::to_string(unknown))/"matches.json");
         auto peer=f.service(1-first,request(1-first,100,0x10003,unknown?-607:0));
-        if(unknown){unsigned peerPrep=0,peerOrdinary=0;nativeDebit(*peer,100,1-first,1,false,peerPrep,peerOrdinary);}
-        else{unsigned peerPrep=0,peerOrdinary=0;nativeDebit(*peer,100,1-first,4,false,peerPrep,peerOrdinary);}
+        if(unknown){freeAccess(*peer);}
+        else{unsigned peerPrep=0,peerOrdinary=0;nativeDebit(*peer,100,1-first,3,false,peerPrep,peerOrdinary);}
         check(f.ledger->snapshot().at(key)==receipt);
         check(f.matches->snapshot().at("match/1").at("comparison")=="unresolved-or-conflicting-reports");
-        // An ordinary subsequent mail access costs only mail1, never match3.
-        auto again=f.service(first,request(first,96));unsigned againPrep=0,againOrdinary=0;
-        nativeDebit(*again,96,first,1,false,againPrep,againOrdinary);
+        // Receive-only reconnection is free and never repeats match3.
+        auto again=f.service(first,request(first,97));freeAccess(*again);
         check(f.ledger->snapshot().at(key)==receipt);++cases;
     }
     // Default match-OFF stays non-billing even with mail policy active.
     {
         Fixture f(root/"disabled",10,false);check(f.matches->snapshot().empty());f.end();
         auto s=f.service(0,request(0,10));unsigned prep=0,ordinary=0;
-        nativeDebit(*s,10,0,1,false,prep,ordinary);
-        check(f.matches->snapshot().empty()&&f.ledger->snapshot().size()==1);++cases;
+        freeAccess(*s);
+        check(f.matches->snapshot().empty()&&f.ledger->snapshot().empty());++cases;
     }
     // Carrier loss is NOT automatically classified as reset1.
     {
         Fixture f(root/"transport",10);f.end(true);
         auto s=f.service(0,request(0,10,0x10003,-607));
-        unsigned prep=0,ordinary=0;nativeDebit(*s,10,0,1,false,prep,ordinary);
+        freeAccess(*s);
         check(f.matches->snapshot().at("match/1").at("participants").at(0).at("deferred")==true);
         check(!f.ledger->snapshot().contains("match/1/side:0"));++cases;
     }
@@ -233,9 +285,9 @@ int main(){try{
     {
         Fixture f(root/"frozen",10);f.settings->save(2,9,true,true);f.end();
         auto first=f.service(0,request(0,10));unsigned firstPrep=0,firstOrdinary=0;
-        nativeDebit(*first,10,0,5,false,firstPrep,firstOrdinary);
+        nativeDebit(*first,10,0,3,false,firstPrep,firstOrdinary);
         auto second=f.service(1,request(1,10,0x10003,0,false));unsigned prep=0,ordinary=0;
-        nativeDebit(*second,10,1,5,false,prep,ordinary);
+        nativeDebit(*second,10,1,3,false,prep,ordinary);
         check(f.matches->snapshot().at("match/1").at("normal_units")==3);++cases;
     }
     // Owner/profile mutation, incomplete request, and missing ledger fail closed.
@@ -259,7 +311,7 @@ int main(){try{
             auto wire=stale?initialRequest(side,10):request(side,10,0x10003,-610);
             wire[173]=4; // Mail access, retaining the frozen stale result.
             auto s=f.service(side,wire);unsigned prep=0,ordinary=0;
-            nativeDebit(*s,10,side,1,false,prep,ordinary);
+            freeAccess(*s);
             const auto p=f.matches->snapshot().at("match/1").at("participants").at(side);
             check(p.at("deferred")==true&&p.at("claim").is_null()&&!p.at("settled").get<bool>());
             check(!f.ledger->snapshot().contains("match/1/side:"+std::to_string(side)));
@@ -319,5 +371,5 @@ int main(){try{
     }
     rejects([]{(void)diagnostic::creditNoticeReply(std::wstring(129,L'A'));});
     rejects([]{(void)diagnostic::creditNoticeReply(std::wstring(L"a\0b",3));});
-    std::cout<<"PASS "<<cases<<" production integration scenarios; independent first-access settlement, carrier hooks, no-history, native debit, partial0..3, additive mail, reset both, opt-in, no replay; synthetic only\n";
+    std::cout<<"PASS "<<cases<<" production integration scenarios; independent first-access settlement, carrier hooks, no-history, native debit, partial0..3, free receive-only access, reset both, opt-in, no replay; synthetic only\n";
 }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}

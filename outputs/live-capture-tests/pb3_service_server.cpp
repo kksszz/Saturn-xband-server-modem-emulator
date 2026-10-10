@@ -2,6 +2,7 @@
 #include <xband/local_phone_policy.hpp>
 #include <xband/local_match_roles.hpp>
 #include <xband/standby_registration.hpp>
+#include <xband/media_card_control.hpp>
 #include "local_service_endpoint.hpp"
 #include "diagnostic_outgoing_request.hpp"
 #include <xband/mail_capture_store.hpp>
@@ -273,8 +274,43 @@ public:
     std::shared_ptr<diagnostic::LiveMatchCredits> matchCredits;
     std::string automaticMatchEpisode;
     bool mailCreditDecided=false,mailCreditBlocked=false;
+    std::string mailSendBatch;
+    unsigned mailSendUnits=0;
     bool mailCreditDenied=false,creditDenialPrepared=false;
     std::string creditNoticeEvent;
+    std::function<xband::CardMatchAdmission()> matchCardAdmission;
+    void setMatchCardAdmission(std::function<xband::CardMatchAdmission()> value){matchCardAdmission=std::move(value);}
+    bool prepareMatchCardDenied(xband::CardMatchAdmission reason){
+        if(standbyAbort)standbyAbort();roles->withdraw(side);standbyEngaged=false;
+        if(prepareOriginalCardWarning(reason,"card_match_denied","No match role, peer number or carrier assigned; no additional debit"))return true;
+        return prepareCreditNotice(
+            L"カードの状態を確認できません。カードとエミュレーターの状態を確認してから対戦を申し込んでください。今回は対戦接続は行いません。",
+            "card_match_denied","No match role, peer number or carrier assigned; no additional debit");
+    }
+    xband::CardMatchAdmission currentMatchCardAdmission()const{
+        if(matchCardAdmission){const auto r=matchCardAdmission();if(r!=xband::CardMatchAdmission::allowed)return r;}
+        const auto at=xband::registrationOffset(p.tcp.captured,135),length=xband::registrationCardLength(p.tcp.captured);
+        const auto card=p.tcp.cardDebitReleased&&p.tcp.cardDebit.updatedCard?*p.tcp.cardDebit.updatedCard:
+            media_card::registrationCardReport(std::span<const uint8_t>(p.tcp.captured).subspan(at,8+length));
+        if(!card.raw)return xband::CardMatchAdmission::missing;
+        if(card.value<0)return xband::CardMatchAdmission::unavailable;
+        return card.value==0?xband::CardMatchAdmission::empty:xband::CardMatchAdmission::allowed;
+    }
+    bool prepareMailCardDenied(xband::CardMatchAdmission reason,const std::string& detail={}){
+        if(prepareOriginalCardWarning(reason,"credit_mail_card_denied",detail.empty()?"Current card rejected before outbox planning; prior records unchanged":detail))return true;
+        return prepareCreditNotice(
+            L"カードの状態を確認できません。カードとエミュレーターの状態を確認してください。今回はメール送受信・対戦接続は行いません。",
+            "credit_mail_card_denied",detail.empty()?"Current card rejected before outbox planning; prior records unchanged":detail);
+    }
+    bool prepareOriginalCardWarning(xband::CardMatchAdmission reason,const char* event,const std::string& detail){
+        const uint16_t id=reason==xband::CardMatchAdmission::missing?0x75:
+            reason==xband::CardMatchAdmission::empty?0x42:
+            reason==xband::CardMatchAdmission::unreadable?0x107:0;
+        if(!id)return false; // Unknown/save-failed state is not a physical card fault.
+        p.tcp.creditDenialReply=diagnostic::originalCardWarningReply(id);
+        creditNoticeEvent=event;recordActivity(event,detail+"; reconstructed native warning id="+std::to_string(id));
+        return true;
+    }
     bool prepareCreditNotice(const wchar_t* message,const char* event,const std::string& detail){
         p.tcp.creditDenialReply=diagnostic::creditNoticeReply(message);
         creditNoticeEvent=event;
@@ -316,12 +352,24 @@ public:
         if(diagnostic::activeUsageArea&&!diagnostic::activeUsageArea->accessAllowed(phone,code==4))return true;
 #endif
         recordRequest(code);
-        unsigned amount=code==4&&values.mailEnabled?values.mail:0;
+        unsigned amount=0;
         std::string fixedEpisode;
         try{
             if(!serviceCreditLedger||(values.matchEnabled&&!matchCredits))throw std::runtime_error("Credit ledger unavailable");
+            if(values.mailEnabled){
+                const auto records=diagnostic::outgoingMailBatch(wire);
+                if(!records.empty()&&!localMailJournal)throw std::runtime_error("Sending mail requires durable journal");
+                const auto account=diagnostic::mailAccountKey(wire).first;
+                if(!records.empty()&&values.mail>0&&!serviceCreditLedger->mailSendAlreadyPaid(account,records)){
+                    const auto admission=currentMatchCardAdmission();
+                    if(admission!=xband::CardMatchAdmission::allowed)return prepareMailCardDenied(admission);
+                }
+                const auto plan=serviceCreditLedger->planMailSend(account,records,values.mail);
+                mailSendBatch=plan.batch;amount=mailSendUnits=plan.units;
+                if(amount)fixedEpisode=mailSendBatch;
+            }
             if(values.matchEnabled){
-                const auto plan=matchCredits->observeAndPlan(side,wire,values.mail,values.mailEnabled,*serviceCreditLedger);
+                const auto plan=matchCredits->observeAndPlan(side,wire,mailSendUnits,values.mailEnabled,*serviceCreditLedger);
                 if(plan.state==diagnostic::LiveMatchCredits::Plan::State::Waiting){
                     return prepareCreditNotice(L"この端末の対戦結果を確認できません。今回は度数消費・メール送受信・対戦接続は行いません。サーバーの記録を確認してください。",
                         "credit_match_waiting","Own fresh result missing or unclassified; peer access is not required; no debit or service");
@@ -330,7 +378,12 @@ public:
                 if(plan.state==diagnostic::LiveMatchCredits::Plan::State::Deferred){
                     recordActivity("credit_match_deferred","Episode="+plan.episode+"; unclaimed match retained for review; ordinary mail and next match allowed");
                 }
-                if(plan.state==diagnostic::LiveMatchCredits::Plan::State::Ready){amount=plan.amount;fixedEpisode=plan.debitKey;automaticMatchEpisode=plan.episode;mailCreditDenied=plan.mailDenied;}
+                if(plan.state==diagnostic::LiveMatchCredits::Plan::State::Ready){
+                    mailCreditDenied=plan.mailDenied;
+                    // A recovered paid match has no new debit. New letters on
+                    // that access still need their own per-letter transaction.
+                    if(plan.amount||!mailSendUnits||plan.mailDenied){amount=plan.amount;fixedEpisode=plan.debitKey;automaticMatchEpisode=plan.episode;}
+                }
             }
             if(!amount)return mailCreditDenied?prepareCreditDenied():true;
             const auto at=xband::registrationOffset(wire,135),length=xband::registrationCardLength(wire);
@@ -342,7 +395,9 @@ public:
             automaticMailDebit=std::make_shared<diagnostic::ServiceMailCredit>(serviceCreditLedger,phone,
                 std::to_string(GetCurrentProcessId())+":"+std::to_string(GetTickCount64())+":"+std::to_string(side)+":"+std::to_string(cardTrialSession),
                 amount,card,[this](const char* event,const nlohmann::json& debit){
-                    auto row=activityContext;row["side"]=side;row["event"]=event;row["credit_trial_scope"]=automaticMatchEpisode.empty()?"automatic-mail-access":"automatic-match-settlement";
+                    auto row=activityContext;row["side"]=side;row["event"]=event;row["credit_trial_scope"]=automaticMatchEpisode.empty()?"automatic-mail-send":"automatic-match-settlement";
+                    row["mail_send_units"]=mailCreditDenied?0:mailSendUnits;
+                    if(!mailSendBatch.empty())row["mail_send_batch"]=mailSendBatch;
                     if(!automaticMatchEpisode.empty())row["match_credit_episode"]=automaticMatchEpisode;
                     row["credit_episode"]=automaticMailDebit->episodeKey();row["credit_settlement_state"]=debit.at("state");
                     row["requested_credits"]=debit.at("amount");row["credits_before"]=debit.at("initial_card").at("value");
@@ -359,9 +414,21 @@ public:
                     }
                     std::cout<<"XBAND_SERVICE_CREDIT event="<<event<<" side="<<side<<" amount="<<debit.at("amount")<<" state="<<debit.at("state")<<'\n'<<std::flush;
                 },fixedEpisode,!automaticMatchEpisode.empty());
+            if(mailSendUnits&&!mailCreditDenied)serviceCreditLedger->bindMailSend(mailSendBatch,automaticMailDebit->episodeKey());
             automaticMailDebit->attach(p.tcp);
         }catch(const std::exception& e){
             std::cerr<<"XBAND_SERVICE_CREDIT_BLOCKED side="<<side<<" reason="<<e.what()<<'\n';
+            if(code==2||code==3){
+                const auto admission=currentMatchCardAdmission();
+                if(admission!=xband::CardMatchAdmission::allowed)return prepareMatchCardDenied(admission);
+            }
+            const std::string reason=e.what();
+            if(reason=="Previous outbox is unresolved"||reason=="Unresolved prior mail debit; no retry or new consumption")
+                return prepareCreditNotice(L"前回のメール送信結果を確認できません。二重送信・二重消費を防ぐため、今回はメール送受信・対戦接続は行いません。サーバーの記録を確認してください。",
+                    "credit_mail_unresolved",reason);
+            if(reason=="Ambiguous overlapping outbox; no repeated charge")
+                return prepareCreditNotice(L"送信済みのメールと今回の送信内容が重なり、新しい送信か確認できません。今回はメール送受信・対戦接続は行いません。サーバーの記録を確認してください。",
+                    "credit_mail_overlap",reason);
             // Before wire issue only: explain rejection without processing mail.
             // Issued/uncertain exchanges are still blocked by the TCP observer.
             return prepareCreditNotice(L"対戦精算またはカード状態を確認できません。今回は度数消費・メール送受信・対戦接続は行いません。サーバーの記録を確認してください。",
@@ -604,9 +671,9 @@ public:
             if(standbyEngaged&&standbyAbort)standbyAbort();
             roles->withdraw(side);standbyEngaged=false;
             observation->mailCaptureState=creditNoticeEvent.empty()?"credit_insufficient":creditNoticeEvent;
-            recordActivity(creditNoticeEvent.empty()?"credit_insufficient":"credit_notice_sent","Bounded22/02 notice queued; no mail accept/delivery/clear or match continuation; no debit retry/refund");
+            recordActivity(creditNoticeEvent.empty()?"credit_insufficient":"credit_notice_sent","Card/service notice queued; no mail accept/delivery/clear or match continuation; no debit retry/refund");
             std::cout<<"CARD_CREDIT_NOTICE side="<<side<<" reason="<<observation->mailCaptureState<<" requested="<<p.tcp.cardDebit.requested
-                <<" actual="<<p.tcp.cardDebit.result.value_or(0)<<";22/02 queued, no ordinary service reply\n"<<std::flush;
+                <<" actual="<<p.tcp.cardDebit.result.value_or(0)<<";notice/02 queued, no ordinary service reply\n"<<std::flush;
         };
         p.tcp.prepareServiceReply=[this]{
             // Validate the supported registration before assigning any role.
@@ -674,8 +741,14 @@ public:
                 if(requestCode==2&&named&&namedTargetAccess&&!namedTargetAccess(named->second))return prepareTimeDenied(requestCode,true);
             }
 #endif
+            if(requestCode==2||requestCode==3){
+                const auto admission=currentMatchCardAdmission();
+                if(admission!=xband::CardMatchAdmission::allowed)return prepareMatchCardDenied(admission);
+            }
             if(localMailJournal&&(requestCode==2||requestCode==3||requestCode==4)&&!journaled){
-                const auto id=localMailJournal->append(p.tcp.captured,side);journaled=true;
+                const auto id=localMailJournal->append(p.tcp.captured,side,mailSendBatch);
+                if(!mailSendBatch.empty())serviceCreditLedger->acceptedMailSend(mailSendBatch,id);
+                journaled=true;
                 std::cout<<"LOCAL_MAIL_JOURNAL_COMMITTED side="<<side<<" submission="<<id<<" code="<<unsigned(requestCode)<<"; persistent observation, no receipt/clear\n"<<std::flush;
             }
             if(requestCode==4){
@@ -732,6 +805,9 @@ public:
                 const std::string name(p.tcp.captured.begin()+namePos,nameEnd);
                 const auto named=LocalTCPProbe::namedRequestBody(p.tcp.captured);
                 xband::StandbyRegistration::Decision decision;
+#ifdef PB3_PAIR_CONTROL
+                try{
+#endif
 #ifdef PB3_USAGE_TIME_POLICY
                 try{
 #endif
@@ -745,6 +821,9 @@ public:
                     // not a transport error; never clear the guest outbox.
                     return prepareTimeDenied(requestCode);
                 }
+#endif
+#ifdef PB3_PAIR_CONTROL
+                }catch(const PB3CardAdmissionDenied& e){return prepareMatchCardDenied(e.reason);}
 #endif
                 if(named&&lastNamedDecision!=decision.result){
                     std::cout<<"NAMED_RIVAL_REQUEST side="<<side<<" target="<<named->second
@@ -1057,7 +1136,7 @@ public:
     bool peek(uint8_t &b)const override{return service().peek(b);}
     void consume()override{service().consume();++observation->sent;}
     size_t pending()const override{return service().pending();}
-void reset()override{interruptReviewedReset();if(cardTrials){publishCardTrial();finishCardTrialHistory();cardTrials->finish(side,cardTrialSession);}if(activityRequested&&!activityEnded){recordActivity(p.tcp.end02Sent?"service_end":"service_abort");}if(!p.tcp.end02Sent&&(!standbyRequest||standbyEngaged)){if(standbyEngaged&&standbyAbort)standbyAbort();roles->withdraw(side);}service().reset();reviewedResetBridge.reset();automaticMailDebit.reset();automaticMatchEpisode.clear();creditNoticeEvent.clear();mailCreditDenied=creditDenialPrepared=false;mailCreditDecided=mailCreditBlocked=false;standbyEngaged=false;configure();if(cardTrials)cardTrialSession=cardTrials->begin(side);cardTrialHistoryStages=0;verified=false;activityRequested=activityEnded=activityError=awardRecorded=pointResultRecorded=false;activityContext=nlohmann::json::object();}
+void reset()override{interruptReviewedReset();if(cardTrials){publishCardTrial();finishCardTrialHistory();cardTrials->finish(side,cardTrialSession);}if(activityRequested&&!activityEnded){recordActivity(p.tcp.end02Sent?"service_end":"service_abort");}if(!p.tcp.end02Sent&&(!standbyRequest||standbyEngaged)){if(standbyEngaged&&standbyAbort)standbyAbort();roles->withdraw(side);}service().reset();reviewedResetBridge.reset();automaticMailDebit.reset();automaticMatchEpisode.clear();mailSendBatch.clear();mailSendUnits=0;creditNoticeEvent.clear();mailCreditDenied=creditDenialPrepared=false;mailCreditDecided=mailCreditBlocked=false;standbyEngaged=false;configure();if(cardTrials)cardTrialSession=cardTrials->begin(side);cardTrialHistoryStages=0;verified=false;activityRequested=activityEnded=activityError=awardRecorded=pointResultRecorded=false;activityContext=nlohmann::json::object();}
     ~PB3Service(){interruptReviewedReset();if(cardTrials){publishCardTrial();finishCardTrialHistory();cardTrials->finish(side,cardTrialSession);}if(activityRequested&&!activityEnded)recordActivity(p.tcp.end02Sent?"service_end":"service_abort");if(!p.tcp.end02Sent&&(!standbyRequest||standbyEngaged)){if(standbyEngaged&&standbyAbort)standbyAbort();roles->withdraw(side);}}
     void setActivityHistory(std::shared_ptr<diagnostic::ActivityHistory> value,std::function<uint64_t(const nlohmann::json&)> identity={}){activity=std::move(value);activityIdentity=std::move(identity);}
     void setStandbyCallbacks(std::function<xband::StandbyRegistration::Decision(const std::string&,uint32_t)> request,
@@ -1357,6 +1436,7 @@ int main(){try{
 #endif
             );
 #ifdef PB3_PAIR_CONTROL
+            endpoint->setMatchCardAdmission([pair,i]{pair->enforceAdmission();return pair->cardAdmission(i,GetTickCount64());});
             if(pair->standbyEnabled)endpoint->setStandbyCallbacks(
                 [pair,i](const std::string& phone,uint32_t game){return pair->registerStandby(i,phone,game);},
                 [pair,i]{pair->abortStandbyService(i);});
@@ -1436,12 +1516,23 @@ int main(){try{
 #if defined(PB3_SERVER_WINDOW) && defined(XBAND_FRONTEND_SERVER) && defined(PB3_PAIR_CONTROL)
         for(unsigned side=0;side<2;++side){
             const bool connected=monitor.telephoneLineConnected(side);
+            if(const auto inserted=monitor.takeCardRequest(side)){
+                if(pair->mediaCards[side].request(*inserted,now))pair->record(side,"media_card_switch",*inserted?"仮想サターンメディアカードの挿入を要求":"仮想サターンメディアカードの取り外しを要求");
+            }
+            if(const auto fault=monitor.takeCardFaultRequest(side)){
+                if(pair->mediaCards[side].requestReadFault(*fault,now))pair->record(side,"media_card_read_fault",*fault?"カード挿入状態を保持して読取異常を要求":"カード読取異常の解除を要求");
+            }
+            if(const auto image=monitor.takeCardImageRequest(side)){
+                if(pair->mediaCards[side].requestImage(*image,now))pair->record(side,"media_card_replace","仮想サターンメディアカードの差し替えを要求（挿入中はOFF→ON）");
+                else pair->record(side,"media_card_replace_rejected","状態取得・保存・交換処理中のため拒否。状態を確認して再操作してください。");
+            }
             pair->setTelephoneLine(side,connected);
             hosts[side]->setAccepting(connected);
             hosts[side+2]->setAccepting(connected);
             // Management polling survives OFF to report the line state.
             // It is not a guest telephone/service connection.
         }
+        pair->enforceAdmission();
 #endif
         for(auto &h:hosts)if(!h->step(now))throw std::runtime_error("PB3 host stopped");
         if(profileNames)for(unsigned i=0;i<2;++i){
@@ -1502,6 +1593,7 @@ int main(){try{
 #ifdef PB3_SERVER_WINDOW
 #ifdef XBAND_FRONTEND_SERVER
             auto display=status;
+            display["media_cards"]=nlohmann::json::array({pair->mediaCards[0].snapshot(now),pair->mediaCards[1].snapshot(now)});
             display["diagnostic_test_progress"]=xband::monitor::readTestProgressLine(std::getenv("XBAND_DIAGNOSTIC_TEST_PROGRESS_FILE"));
             for(unsigned i=0;i<2;++i){std::ostringstream hex;hex<<std::hex<<std::uppercase<<std::setfill('0');for(auto b:pair->recent[i])hex<<std::setw(2)<<unsigned(b)<<' ';display[i?"hex1":"hex0"]=hex.str();}
             monitor.publish(display);

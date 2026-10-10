@@ -12,6 +12,8 @@
 #include <deque>
 #include <sstream>
 #include <iomanip>
+#include <utility>
+#include <xband/media_card_control.hpp>
 #include "xband_mail_status.hpp"
 #include "modem_phone_display.hpp"
 #include "game_ranking_settings.hpp"
@@ -25,6 +27,7 @@
 #include "server_broadcast_window.hpp"
 #include "service_credit_window.hpp"
 #include "connection_view.hpp"
+#include "media_card_exchange_window.hpp"
 #ifdef XBAND_DASHBOARD_RENDER_TEST
 #include <gdiplus.h>
 #include <filesystem>
@@ -38,6 +41,42 @@ class XbandDashboard {
     std::thread worker;std::mutex mutex;J data;
     std::atomic<HWND> hwnd{nullptr};std::atomic<bool> ready{false},closed{false};
     std::array<std::atomic<bool>,2> telephoneLine{true,true};
+    std::array<std::optional<bool>,2> cardRequests;
+    std::array<std::optional<bool>,2> cardFaultRequests;
+    std::array<std::optional<std::string>,2> cardImageRequests;
+    diagnostic::MediaCardExchangeWindow cardExchangeWindow;
+    J cardState(unsigned side,uint64_t now)const{
+        J state={{"available",false},{"configured",false},{"inserted",false},{"units",nullptr},{"save_failed",false},{"pending",false}};
+        if(data.contains("media_cards")&&data.at("media_cards").is_array()&&data.at("media_cards").size()==2)state=data.at("media_cards")[side];
+        const auto seen=state.value("reported_at_ms",uint64_t{});
+        if(!state.value("available",false)||now<seen||now-seen>xband::MediaCardControl::staleAfterMs){
+            state["available"]=false;state["units"]=nullptr;
+        }
+        return state;
+    }
+    void syncCardButtons(HWND w){
+        std::lock_guard lock(mutex);
+        for(unsigned side=0;side<2;++side)if(auto h=GetDlgItem(w,992+side)){
+            const auto state=cardState(side,GetTickCount64());
+            const bool enabled=state.value("available",false)&&state.value("configured",false)&&
+                !state.value("save_failed",false)&&!state.value("pending",false)&&!cardRequests[side]&&!cardFaultRequests[side]&&!cardImageRequests[side];
+            if(auto exchange=GetDlgItem(w,996+side))EnableWindow(exchange,
+                state.value("available",false)&&state.value("replace_supported",false)&&state.value("can_replace",false)&&
+                !state.value("pending",false)&&!cardRequests[side]&&!cardFaultRequests[side]&&!cardImageRequests[side]);
+            if(bool(IsWindowEnabled(h))!=enabled)EnableWindow(h,enabled);
+            const auto label=state.value("pending",false)||cardRequests[side]||cardFaultRequests[side]?L"反映中...":
+                !state.value("available",false)?L"状態取得不可":!state.value("configured",false)?L"カード未設定":
+                state.value("save_failed",false)?L"保存エラー":state.value("inserted",false)?L"取り外す（OFF）":L"挿入（ON）";
+            wchar_t old[80]{};GetWindowTextW(h,old,80);if(std::wstring_view(old)!=label)SetWindowTextW(h,label);
+            if(auto fault=GetDlgItem(w,994+side)){
+                const bool faultEnabled=enabled&&state.contains("read_fault");
+                if(bool(IsWindowEnabled(fault))!=faultEnabled)EnableWindow(fault,faultEnabled);
+                const auto faultLabel=state.value("pending",false)||cardRequests[side]||cardFaultRequests[side]?L"反映中...":
+                    !state.contains("read_fault")?L"読取異常：未対応":state.value("read_fault",false)?L"読取を正常に戻す":L"読取異常にする";
+                GetWindowTextW(fault,old,80);if(std::wstring_view(old)!=faultLabel)SetWindowTextW(fault,faultLabel);
+            }
+        }
+    }
     std::array<xband::monitor::CallTimer,2> callTimers;
     std::array<uint64_t,2> prior{},rate{};uint64_t last=0;
     std::deque<std::wstring> events;std::string previousState;
@@ -179,7 +218,7 @@ class XbandDashboard {
         control(L"STATIC",L"1〜60分。みじかい ≦ ふつう ≦ ながい（同じ値も設定可能）。\n保存後の新しい申し込みから、通知文と待機期限に同じ値を使います。\nすでに待機中の期限は変更しません。",0,18,216,520,56,0);
         control(L"BUTTON",L"初期値を表示",WS_TABSTOP,144,282,170,32,974);
         control(L"BUTTON",L"保存",WS_TABSTOP|BS_DEFPUSHBUTTON,340,282,170,32,973);
-        waitMessage=control(L"STATIC",L"初期値：みじかい1分／ふつう2分／ながい4分。変更後は保存してください。",0,18,330,520,42,0);
+        waitMessage=control(L"STATIC",L"初期値：みじかい5分／ふつう10分／ながい12分。変更後は保存してください。",0,18,330,520,42,0);
         fillWaitSettings(waitSettings->snapshot());
         showSavedWaitSettings();
         if(show)ShowWindow(waitWindow,SW_SHOW);
@@ -439,17 +478,17 @@ class XbandDashboard {
         SelectObject(d,old);DeleteObject(pen);
     }
     void draw(HDC d){
-        rect(d,0,0,1080,800,RGB(13,20,33));
+        rect(d,0,0,1080,880,RGB(13,20,33));
         text(d,30,8,1000,L"XBAND  /  通信モニター",28);
         text(d,30,45,1000,L"ローカルTCP   127.0.0.1   |   通信状況 / 読み取り専用   |   500ミリ秒ごとに更新",16,RGB(132,154,180));
         if(data.empty()){text(d,30,130,950,L"サーバーの状態を取得しています...");return;}
         const auto progress=data.value("diagnostic_test_progress",std::string{});
-        if(!progress.empty())text(d,30,724,1020,wide(progress),14,RGB(255,207,125));
+        if(!progress.empty())text(d,30,804,1020,wide(progress),14,RGB(255,207,125));
         const auto &p=data.at("pair_control");const unsigned state=p.at("state");const bool failed=p.at("failed");
         const unsigned caller=p.value("caller",2u),callee=caller<2?1-caller:2;
         const auto requested=p.value("requested",std::array<bool,2>{});
         for(int i=0;i<2;++i){
-            int x=i?740:30;rect(d,x,120,310,350,RGB(25,38,57));
+            int x=i?740:30;rect(d,x,120,310,430,RGB(25,38,57));
             const auto &e=data.at("endpoints")[i];const auto &o=e.at("pb3_observation");
             bool connected=e.at("connected");bool joined=p.at("joined")[i];
             text(d,x+18,137,270,L"MODEM "+std::to_wstring(i+1),24);
@@ -464,8 +503,18 @@ class XbandDashboard {
             text(d,x+18,395,270,wide(xband::monitor::mailClearLine(o)),13);
             const bool line=telephoneLine[i].load();
             text(d,x+18,420,270,line?L"電話線：接続（ON）":L"電話線：切断（OFF）",16,line?RGB(63,219,169):RGB(255,133,133));
+            const auto card=cardState(unsigned(i),GetTickCount64());
+            const auto cardLabel=!card.value("available",false)?std::wstring(L"状態・残度数：未取得"):
+                !card.value("command_error",std::string{}).empty()?std::wstring(L"交換・操作失敗：元カードを保持"):
+                !card.value("configured",false)?std::wstring(L"未設定　残度数：--"):
+                card.value("save_failed",false)?std::wstring(L"保存エラー　残度数：--"):
+                card.value("inserted",false)&&(card.value("read_fault",false)||card.at("units").is_null())?
+                    std::wstring(L"挿入（ON）読取不可　残度数：--"):
+                std::wstring(card.value("inserted",false)?L"挿入（ON）":L"取り外し（OFF）")+L"　残度数："+
+                    (card.at("units").is_null()?std::wstring(L"読取不可"):std::to_wstring(card.at("units").get<int32_t>()));
+            text(d,x+18,496,270,cardLabel,14,card.value("read_fault",false)&&card.value("inserted",false)?RGB(255,133,133):card.value("available",false)?RGB(255,207,125):RGB(132,154,180));
         }
-        rect(d,370,120,340,350,RGB(24,43,61));text(d,391,137,295,L"XBAND SERVER",24);
+        rect(d,370,120,340,430,RGB(24,43,61));text(d,391,137,295,L"XBAND SERVER",24);
         text(d,391,185,295,failed?L"SESSION CLOSED":state==2?L"PEER RELAY ACTIVE":state==1?L"INCOMING CALL":caller==2&&(requested[0]||requested[1])?L"WAITING FOR OTHER GAME":L"READY / WAITING",20,failed?RGB(255,133,133):RGB(63,219,169));
         text(d,391,231,295,L"Transport: "+wide(p.at("transport").get<std::string>()),16);
         text(d,391,269,295,wide(diagnostic::modemRouteDisplay(data.at("endpoints"),caller)),16);
@@ -477,17 +526,17 @@ class XbandDashboard {
         if(capture.value("enabled",false))text(d,391,395,295,L"Saved != delivered\nNo delivery / read receipt",13,RGB(255,207,125));
         const auto links=xband::monitor::connectionView(data,{telephoneLine[0].load(),telephoneLine[1].load()});
         const auto green=RGB(63,219,169),gray=RGB(132,154,180),amber=RGB(255,207,125);
-        rect(d,30,480,1020,124,RGB(25,38,57));
-        text(d,48,487,120,L"モデム1",18);text(d,486,487,140,L"サーバー",18);text(d,918,487,120,L"モデム2",18);
+        rect(d,30,560,1020,124,RGB(25,38,57));
+        text(d,48,567,120,L"モデム1",18);text(d,486,567,140,L"サーバー",18);text(d,918,567,120,L"モデム2",18);
         for(unsigned i=0;i<2;++i){
             const auto link=links.service[i];const bool call=link==xband::monitor::ServiceLink::calling;
             const int x1=i?640:170,x2=i?900:450;
-            arrow(d,x1,x2,511,call?green:gray,call,call);
-            text(d,x1,483,x2-x1,call?L"サーバーと通信中":link==xband::monitor::ServiceLink::ready?L"通信路待機（通話なし）":L"未接続 / 電話線OFF",14,call?green:gray);
+            arrow(d,x1,x2,591,call?green:gray,call,call);
+            text(d,x1,563,x2-x1,call?L"サーバーと通信中":link==xband::monitor::ServiceLink::ready?L"通信路待機（通話なし）":L"未接続 / 電話線OFF",14,call?green:gray);
         }
         const auto peer=links.peer;using Peer=xband::monitor::PeerLink;
         const bool linked=peer==Peer::connected,fromLeft=peer==Peer::dialingLeft,fromRight=peer==Peer::dialingRight;
-        arrow(d,170,900,549,linked?green:fromLeft||fromRight?amber:gray,linked||fromLeft,linked||fromRight);
+        arrow(d,170,900,629,linked?green:fromLeft||fromRight?amber:gray,linked||fromLeft,linked||fromRight);
         const bool flowing=linked&&(rate[0]>0||rate[1]>0)&&GetTickCount64()-last<2000;
         const auto peerLabel=linked?
             std::wstring(flowing?L"回線接続・データ通信中：モデム":L"回線接続・データ停止：モデム")+
@@ -495,29 +544,29 @@ class XbandDashboard {
             fromLeft?std::wstring(L"モデム1（発信）→ モデム2（着信待ち）"):
             fromRight?std::wstring(L"モデム2（発信）→ モデム1（着信待ち）"):
             peer==Peer::disconnected?std::wstring(L"対戦接続：切断"):std::wstring(L"対戦接続：待機（通話なし）");
-        text(d,170,523,730,peerLabel,15,linked?green:fromLeft||fromRight?amber:gray);
+        text(d,170,603,730,peerLabel,15,linked?green:fromLeft||fromRight?amber:gray);
         for(int i=0;i<2;++i){const bool active=linked&&rate[i]>0&&GetTickCount64()-last<2000;
             auto sent=p.at("sent")[i].get<uint64_t>();auto received=p.at("received")[1-i].get<uint64_t>();
-            text(d,48+i*510,568,492,(i?L"2 → 1":L"1 → 2")+std::wstring(active?L" 通信中 ":L" 停止 ")+std::to_wstring(active?rate[i]:0)+L" B/s  受付 "+std::to_wstring(sent)+L" / 配送 "+std::to_wstring(received)+L" / 待ち "+std::to_wstring(sent>=received?sent-received:0)+L" B",13,active?green:gray);
+            text(d,48+i*510,648,492,(i?L"2 → 1":L"1 → 2")+std::wstring(active?L" 通信中 ":L" 停止 ")+std::to_wstring(active?rate[i]:0)+L" B/s  受付 "+std::to_wstring(sent)+L" / 配送 "+std::to_wstring(received)+L" / 待ち "+std::to_wstring(sent>=received?sent-received:0)+L" B",13,active?green:gray);
         }
-        text(d,30,616,1020,L"Recent game bytes: HEX + ASCII text (binary = \\xHH; not protocol decoding)",14,RGB(132,154,180));
+        text(d,30,696,1020,L"Recent game bytes: HEX + ASCII text (binary = \\xHH; not protocol decoding)",14,RGB(132,154,180));
         for(int i=0;i<2;++i){
             const auto bytes=data.value(i?"hex1":"hex0",std::string("--"));
             const std::wstring direction=i?L"2 -> 1  ":L"1 -> 2  ";
-            text(d,30,638+i*43,1020,direction+L"HEX   "+wide(bytes),15);
-            text(d,30,657+i*43,1020,direction+L"TEXT  "+diagnostic::peerByteText(bytes),15,RGB(113,229,190));
+            text(d,30,718+i*43,1020,direction+L"HEX   "+wide(bytes),15);
+            text(d,30,737+i*43,1020,direction+L"TEXT  "+diagnostic::peerByteText(bytes),15,RGB(113,229,190));
         }
-        text(d,30,746,1020,events.empty()?L"Waiting for state changes":events.back(),14,RGB(132,154,180));
-        text(d,30,770,1020,L"Mail counters describe the last reply preparation. Outbox clear is not a guest completion acknowledgement.",12,RGB(132,154,180));
+        text(d,30,826,1020,events.empty()?L"Waiting for state changes":events.back(),14,RGB(132,154,180));
+        text(d,30,850,1020,L"Mail counters describe the last reply preparation. Outbox clear is not a guest completion acknowledgement.",12,RGB(132,154,180));
         const auto journal=data.value("local_mail_journal",J::object());
-        if(journal.value("enabled",false))text(d,30,789,1020,L"Persistent mail: "+std::to_wstring(journal.value("mails",size_t{0}))+L" submitted / "+std::to_wstring(journal.value("prepared_unconfirmed",size_t{0}))+L" prepared (unconfirmed). No server retry.",11,RGB(132,154,180));
+        if(journal.value("enabled",false))text(d,30,869,1020,L"Persistent mail: "+std::to_wstring(journal.value("mails",size_t{0}))+L" submitted / "+std::to_wstring(journal.value("prepared_unconfirmed",size_t{0}))+L" prepared (unconfirmed). No server retry.",11,RGB(132,154,180));
     }
     static void layoutButtons(HWND w){
         RECT r{};GetClientRect(w,&r);const int ids[]={979,978,950,975,900,976};
         const int count=GetDlgItem(w,976)?6:5,step=count==6?170:206,width=count==6?160:194;
         for(int i=0;i<count;++i)if(auto h=GetDlgItem(w,ids[i])){
-            const int x=(30+i*step)*r.right/1080,y=76*r.bottom/800;
-            const int buttonWidth=width*r.right/1080,buttonHeight=32*r.bottom/800;
+            const int x=(30+i*step)*r.right/1080,y=76*r.bottom/880;
+            const int buttonWidth=width*r.right/1080,buttonHeight=32*r.bottom/880;
             RECT previous{};GetWindowRect(h,&previous);MapWindowPoints(nullptr,w,reinterpret_cast<POINT*>(&previous),2);
             if(previous.left!=x||previous.top!=y||previous.right-previous.left!=buttonWidth||previous.bottom-previous.top!=buttonHeight)
                 MoveWindow(h,x,y,buttonWidth,buttonHeight,TRUE);
@@ -525,9 +574,10 @@ class XbandDashboard {
             if(SendMessageW(h,WM_GETFONT,0,0)!=reinterpret_cast<LRESULT>(font))
                 SendMessageW(h,WM_SETFONT,reinterpret_cast<WPARAM>(font),TRUE);
         }
-        for(int i=0;i<2;++i)if(auto h=GetDlgItem(w,990+i)){
-            const int x=(i?758:48)*r.right/1080,y=444*r.bottom/800;
-            const int width=270*r.right/1080,height=24*r.bottom/800;
+        for(int id=990;id<=997;++id)if(auto h=GetDlgItem(w,id)){
+            const int i=(id-990)%2;
+            const int x=((i?758:48)+(id>=994&&id<996?138:0))*r.right/1080,y=(id<992?444:id<996?520:474)*r.bottom/880;
+            const int width=(id<992||id>=996?270:132)*r.right/1080,height=24*r.bottom/880;
             RECT previous{};GetWindowRect(h,&previous);MapWindowPoints(nullptr,w,reinterpret_cast<POINT*>(&previous),2);
             if(previous.left!=x||previous.top!=y||previous.right-previous.left!=width||previous.bottom-previous.top!=height)
                 MoveWindow(h,x,y,width,height,TRUE);
@@ -541,16 +591,48 @@ class XbandDashboard {
         if(!s)return DefWindowProcW(w,m,a,b);
         if(m==WM_CREATE){
             for(int i=0;i<2;++i)CreateWindowW(L"BUTTON",L"電話線を切断（OFF）",WS_CHILD|WS_VISIBLE|WS_TABSTOP,0,0,0,0,w,reinterpret_cast<HMENU>(INT_PTR(990+i)),GetModuleHandleW(nullptr),nullptr);
+            for(int i=0;i<2;++i)CreateWindowW(L"BUTTON",L"カード状態を取得できません",WS_CHILD|WS_VISIBLE|WS_TABSTOP|WS_DISABLED,0,0,0,0,w,reinterpret_cast<HMENU>(INT_PTR(992+i)),GetModuleHandleW(nullptr),nullptr);
+            for(int i=0;i<2;++i)CreateWindowW(L"BUTTON",L"読取異常：未対応",WS_CHILD|WS_VISIBLE|WS_TABSTOP|WS_DISABLED,0,0,0,0,w,reinterpret_cast<HMENU>(INT_PTR(994+i)),GetModuleHandleW(nullptr),nullptr);
+            for(int i=0;i<2;++i)CreateWindowW(L"BUTTON",L"仮想サターンメディアカードの差し替え...",WS_CHILD|WS_VISIBLE|WS_TABSTOP|WS_DISABLED,0,0,0,0,w,reinterpret_cast<HMENU>(INT_PTR(996+i)),GetModuleHandleW(nullptr),nullptr);
             layoutButtons(w);return 0;
         }
         if(m==WM_SIZE){layoutButtons(w);return 0;}
+        if(m==WM_COMMAND&&(LOWORD(a)==996||LOWORD(a)==997)&&HIWORD(a)==BN_CLICKED){
+            const unsigned side=LOWORD(a)-996;
+            {std::lock_guard lock(s->mutex);const auto state=s->cardState(side,GetTickCount64());
+                if(!state.value("can_replace",false)||state.value("pending",false))return 0;}
+            if(const auto path=s->cardExchangeWindow.open(w,side)){
+                const auto utf8=path->u8string();std::lock_guard lock(s->mutex);
+                s->cardImageRequests[side]=std::string(reinterpret_cast<const char*>(utf8.data()),utf8.size());
+                s->data["media_cards"][side]["pending"]=true;
+            }
+            s->syncCardButtons(w);InvalidateRect(w,nullptr,FALSE);return 0;
+        }
         if(m>=WM_APP+41&&m<=WM_APP+46){
             const int ids[]={900,950,979,978,975,976};const wchar_t* labels[]={L"ゲーム・ポイント設定...",L"使用状況の表示設定...",L"メール履歴...",L"接続・対戦・ポイント履歴...",L"対戦待ち時間設定...",L"消費度数設定..."};
             const auto i=m-(WM_APP+41);
             if(!GetDlgItem(w,ids[i]))CreateWindowW(L"BUTTON",labels[i],WS_CHILD|WS_VISIBLE|WS_TABSTOP,0,0,0,0,w,reinterpret_cast<HMENU>(INT_PTR(ids[i])),GetModuleHandleW(nullptr),nullptr);
             layoutButtons(w);return 0;
         }
-        if(m==WM_TIMER){InvalidateRect(w,nullptr,FALSE);return 0;}
+        if(m==WM_TIMER){s->syncCardButtons(w);InvalidateRect(w,nullptr,FALSE);return 0;}
+        if(m==WM_COMMAND&&(LOWORD(a)==992||LOWORD(a)==993)&&HIWORD(a)==BN_CLICKED){
+            {std::lock_guard lock(s->mutex);const unsigned side=LOWORD(a)-992;
+             const auto state=s->cardState(side,GetTickCount64());
+             if(state.value("available",false)&&state.value("configured",false)&&!state.value("save_failed",false)&&
+                !state.value("pending",false)&&!s->cardRequests[side]&&!s->cardFaultRequests[side]){
+                 s->cardRequests[side]=!state.value("inserted",false);s->data["media_cards"][side]["pending"]=true;
+             }}
+            s->syncCardButtons(w);InvalidateRect(w,nullptr,FALSE);return 0;
+        }
+        if(m==WM_COMMAND&&(LOWORD(a)==994||LOWORD(a)==995)&&HIWORD(a)==BN_CLICKED){
+            {std::lock_guard lock(s->mutex);const unsigned side=LOWORD(a)-994;
+             const auto state=s->cardState(side,GetTickCount64());
+             if(state.value("available",false)&&state.value("configured",false)&&!state.value("save_failed",false)&&
+                state.contains("read_fault")&&!state.value("pending",false)&&!s->cardRequests[side]&&!s->cardFaultRequests[side]){
+                 s->cardFaultRequests[side]=!state.value("read_fault",false);s->data["media_cards"][side]["pending"]=true;
+             }}
+            s->syncCardButtons(w);InvalidateRect(w,nullptr,FALSE);return 0;
+        }
         if(m==WM_COMMAND&&(LOWORD(a)==990||LOWORD(a)==991)&&HIWORD(a)==BN_CLICKED){
             const unsigned side=LOWORD(a)-990;
             const bool connected=!s->telephoneLine[side].load();s->telephoneLine[side]=connected;
@@ -564,12 +646,15 @@ class XbandDashboard {
         if(m==WM_COMMAND&&LOWORD(a)==975){s->openWait(w);return 0;}
         if(m==WM_COMMAND&&LOWORD(a)==976){s->creditWindow.open(w);return 0;}
         if(m==WM_ERASEBKGND)return 1;
-        if(m==WM_PAINT){PAINTSTRUCT ps;auto dc=BeginPaint(w,&ps);auto mem=CreateCompatibleDC(dc);auto bmp=CreateCompatibleBitmap(dc,1080,800);auto old=SelectObject(mem,bmp);
-            {std::lock_guard lock(s->mutex);s->draw(mem);}RECT r;GetClientRect(w,&r);SetStretchBltMode(dc,HALFTONE);StretchBlt(dc,0,0,r.right,r.bottom,mem,0,0,1080,800,SRCCOPY);SelectObject(mem,old);DeleteObject(bmp);DeleteDC(mem);EndPaint(w,&ps);return 0;}
+        if(m==WM_PAINT){PAINTSTRUCT ps;auto dc=BeginPaint(w,&ps);auto mem=CreateCompatibleDC(dc);auto bmp=CreateCompatibleBitmap(dc,1080,880);auto old=SelectObject(mem,bmp);
+            {std::lock_guard lock(s->mutex);s->draw(mem);}RECT r;GetClientRect(w,&r);SetStretchBltMode(dc,HALFTONE);StretchBlt(dc,0,0,r.right,r.bottom,mem,0,0,1080,880,SRCCOPY);SelectObject(mem,old);DeleteObject(bmp);DeleteDC(mem);EndPaint(w,&ps);return 0;}
         if(m==WM_DESTROY){s->closed=true;s->hwnd=nullptr;PostQuitMessage(0);return 0;}return DefWindowProcW(w,m,a,b);
     }
 public:
     bool telephoneLineConnected(unsigned side)const{return telephoneLine.at(side).load();}
+    std::optional<bool> takeCardRequest(unsigned side){std::lock_guard lock(mutex);return std::exchange(cardRequests.at(side),std::nullopt);}
+    std::optional<bool> takeCardFaultRequest(unsigned side){std::lock_guard lock(mutex);return std::exchange(cardFaultRequests.at(side),std::nullopt);}
+    std::optional<std::string> takeCardImageRequest(unsigned side){std::lock_guard lock(mutex);return std::exchange(cardImageRequests.at(side),std::nullopt);}
     void setServiceCreditSettings(std::shared_ptr<diagnostic::ServiceCreditSettings> value){
         {std::lock_guard lock(mutex);creditWindow.setSettings(std::move(value));}
         if(auto w=hwnd.load())PostMessageW(w,WM_APP+46,0,0);
@@ -801,7 +886,7 @@ public:
         ULONG_PTR token{};Gdiplus::GdiplusStartupInput input;
         if(Gdiplus::GdiplusStartup(&token,&input,nullptr)!=Gdiplus::Ok)throw std::runtime_error("GDI+ startup failed");
         struct Stop{ULONG_PTR token;~Stop(){Gdiplus::GdiplusShutdown(token);}} stop{token};
-        Gdiplus::Bitmap bitmap(1080,800,PixelFormat32bppRGB);
+        Gdiplus::Bitmap bitmap(1080,880,PixelFormat32bppRGB);
         {
             Gdiplus::Graphics graphics(&bitmap);const auto dc=graphics.GetHDC();
             XbandDashboard fixture(SnapshotOnly{});fixture.data=snapshot;
@@ -816,18 +901,23 @@ public:
             }
             fixture.draw(dc);
             WNDCLASSW c{};c.lpfnWndProc=DefWindowProcW;c.hInstance=GetModuleHandleW(nullptr);c.lpszClassName=L"XbandButtonLayoutPreview";RegisterClassW(&c);
-            HWND w=CreateWindowW(c.lpszClassName,L"",WS_POPUP|WS_CLIPCHILDREN,-30000,-30000,1080,800,nullptr,nullptr,c.hInstance,nullptr);
+            HWND w=CreateWindowW(c.lpszClassName,L"",WS_POPUP|WS_CLIPCHILDREN,-30000,-30000,1080,880,nullptr,nullptr,c.hInstance,nullptr);
             if(!w)throw std::runtime_error("Button test window");
             // This test host uses DefWindowProc, so invoke creation with our fixture explicitly.
             SetWindowLongPtrW(w,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(&fixture));
-            for(UINT m=WM_APP+41;m<=WM_APP+45;++m)proc(w,m,0,0);
-            for(int id:{979,978,950,975,900}){
+            for(UINT m=WM_APP+41;m<=WM_APP+46;++m)proc(w,m,0,0);
+            for(int id:{979,978,950,975,900,976}){
                 auto h=GetDlgItem(w,id);RECT r{};GetWindowRect(h,&r);MapWindowPoints(nullptr,w,reinterpret_cast<POINT*>(&r),2);
-                if(!h||r.top!=76||r.bottom!=108||r.right-r.left!=194)throw std::runtime_error("Button alignment");
+                if(!h||r.top!=76||r.bottom!=108||r.right-r.left!=160)throw std::runtime_error("Button alignment");
                 int saved=SaveDC(dc);SetViewportOrgEx(dc,r.left,r.top,nullptr);SendMessageW(h,WM_PRINT,reinterpret_cast<WPARAM>(dc),PRF_CLIENT|PRF_NONCLIENT);RestoreDC(dc,saved);
             }
-            SetWindowPos(w,nullptr,0,0,810,600,SWP_NOMOVE|SWP_NOZORDER);layoutButtons(w);
-            for(int id:{979,978,950,975,900}){RECT r{};GetWindowRect(GetDlgItem(w,id),&r);if(r.bottom-r.top!=24)throw std::runtime_error("Resized button alignment");}
+            proc(w,WM_CREATE,0,0);fixture.syncCardButtons(w);
+            for(int id:{990,991,992,993,994,995,996,997}){
+                auto h=GetDlgItem(w,id);RECT r{};GetWindowRect(h,&r);MapWindowPoints(nullptr,w,reinterpret_cast<POINT*>(&r),2);
+                int saved=SaveDC(dc);SetViewportOrgEx(dc,r.left,r.top,nullptr);SendMessageW(h,WM_PRINT,reinterpret_cast<WPARAM>(dc),PRF_CLIENT|PRF_NONCLIENT);RestoreDC(dc,saved);
+            }
+            SetWindowPos(w,nullptr,0,0,810,660,SWP_NOMOVE|SWP_NOZORDER);layoutButtons(w);
+            for(int id:{979,978,950,975,900,976}){RECT r{};GetWindowRect(GetDlgItem(w,id),&r);if(r.bottom-r.top!=24)throw std::runtime_error("Resized button alignment");}
             DestroyWindow(w);GdiFlush();graphics.ReleaseHDC(dc);
         }
         UINT count{},bytes{};Gdiplus::GetImageEncodersSize(&count,&bytes);
@@ -844,7 +934,7 @@ public:
         XbandDashboard fixture(SnapshotOnly{});
         WNDCLASSW c{};c.lpfnWndProc=proc;c.hInstance=GetModuleHandleW(nullptr);c.lpszClassName=L"XbandDashboardRepaintTest";
         RegisterClassW(&c);
-        HWND w=CreateWindowW(c.lpszClassName,L"",WS_POPUP|WS_CLIPCHILDREN,-30000,-30000,1080,800,nullptr,nullptr,c.hInstance,&fixture);
+        HWND w=CreateWindowW(c.lpszClassName,L"",WS_POPUP|WS_CLIPCHILDREN,-30000,-30000,1080,880,nullptr,nullptr,c.hInstance,&fixture);
         check(w!=nullptr);check((GetWindowLongPtrW(w,GWL_STYLE)&WS_CLIPCHILDREN)!=0);
         for(unsigned i=0;i<6;++i)SendMessageW(w,WM_APP+41+i,0,0);
         check(fixture.telephoneLineConnected(0)&&fixture.telephoneLineConnected(1));
@@ -861,22 +951,59 @@ public:
             if(message==WM_SETFONT||message==WM_WINDOWPOSCHANGED)++*reinterpret_cast<unsigned*>(reference);
             return DefSubclassProc(child,message,a,b);
         };
-        for(int id:{979,978,950,975,900,976,990,991}){
+        for(int id:{979,978,950,975,900,976,990,991,992,993,994,995}){
             auto h=GetDlgItem(w,id);check(h!=nullptr);
             check(SetWindowSubclass(h,observer,1,reinterpret_cast<DWORD_PTR>(&changes))!=FALSE);
             ValidateRect(h,nullptr);
         }
         for(unsigned i=0;i<20;++i){layoutButtons(w);SendMessageW(w,WM_TIMER,1,0);}
         check(changes==0);
-        for(int id:{979,978,950,975,900,976,990,991})check(!GetUpdateRect(GetDlgItem(w,id),nullptr,FALSE));
+        for(int id:{979,978,950,975,900,976,990,991,992,993,994,995})check(!GetUpdateRect(GetDlgItem(w,id),nullptr,FALSE));
         SetWindowPos(w,nullptr,0,0,1200,900,SWP_NOMOVE|SWP_NOZORDER|SWP_NOACTIVATE);
         check(changes>0);const auto afterResize=changes;layoutButtons(w);check(changes==afterResize);
-        for(int id:{979,978,950,975,900,976,990,991})RemoveWindowSubclass(GetDlgItem(w,id),observer,1);
+        for(int id:{979,978,950,975,900,976,990,991,992,993,994,995})RemoveWindowSubclass(GetDlgItem(w,id),observer,1);
+        DestroyWindow(w);
+    }
+    static void testMediaCardControls(){
+        auto check=[](bool ok){if(!ok)throw std::runtime_error("Dashboard card controls assertion");};
+        XbandDashboard fixture(SnapshotOnly{});WNDCLASSW c{};c.lpfnWndProc=proc;c.hInstance=GetModuleHandleW(nullptr);c.lpszClassName=L"XbandCardControlsTest";RegisterClassW(&c);
+        HWND w=CreateWindowW(c.lpszClassName,L"",WS_POPUP|WS_CLIPCHILDREN,-30000,-30000,1080,880,nullptr,nullptr,c.hInstance,&fixture);check(w!=nullptr);
+        check(!IsWindowEnabled(GetDlgItem(w,992))&&!IsWindowEnabled(GetDlgItem(w,993)));
+        const auto now=GetTickCount64();
+        J card={{"available",true},{"configured",true},{"inserted",true},{"read_fault",false},{"save_failed",false},{"units",71},{"pending",false},{"reported_at_ms",now}};
+        fixture.data["media_cards"]=J::array({card,card});fixture.data["media_cards"][1]["units"]=96;fixture.syncCardButtons(w);
+        check(!IsWindowEnabled(GetDlgItem(w,996))); // Legacy adapter has no swap support.
+        fixture.data["media_cards"][0]["replace_supported"]=true;fixture.data["media_cards"][0]["can_replace"]=true;
+        fixture.syncCardButtons(w);check(IsWindowEnabled(GetDlgItem(w,996))&&!IsWindowEnabled(GetDlgItem(w,997)));
+        check(IsWindowEnabled(GetDlgItem(w,992))&&IsWindowEnabled(GetDlgItem(w,993)));
+        SendMessageW(w,WM_COMMAND,MAKEWPARAM(992,BN_CLICKED),0);check(!IsWindowEnabled(GetDlgItem(w,992)));
+        check(fixture.takeCardRequest(0)==false&&!fixture.takeCardRequest(1));
+        check(fixture.data["media_cards"][0]["inserted"]==true); // No optimistic physical-state change.
+        fixture.data["media_cards"][0]["inserted"]=false;fixture.data["media_cards"][0]["pending"]=false;fixture.syncCardButtons(w);
+        fixture.telephoneLine[0]=false;
+        SendMessageW(w,WM_COMMAND,MAKEWPARAM(992,BN_CLICKED),0);check(fixture.takeCardRequest(0)==true);check(!fixture.takeCardRequest(1));
+        fixture.data["media_cards"][0]["pending"]=false;
+        fixture.syncCardButtons(w);check(IsWindowEnabled(GetDlgItem(w,994))&&IsWindowEnabled(GetDlgItem(w,995)));
+        SendMessageW(w,WM_COMMAND,MAKEWPARAM(994,BN_CLICKED),0);
+        check(fixture.takeCardFaultRequest(0)==true&&!fixture.takeCardFaultRequest(1));
+        check(!IsWindowEnabled(GetDlgItem(w,992))&&!IsWindowEnabled(GetDlgItem(w,994)));
+        fixture.data["media_cards"][0]["pending"]=false;fixture.data["media_cards"][0]["inserted"]=true;
+        fixture.data["media_cards"][0]["read_fault"]=true;fixture.data["media_cards"][0]["units"]=nullptr;fixture.syncCardButtons(w);
+        check(IsWindowEnabled(GetDlgItem(w,992))&&IsWindowEnabled(GetDlgItem(w,994)));
+        wchar_t faultLabel[80]{};GetWindowTextW(GetDlgItem(w,994),faultLabel,80);check(std::wstring_view(faultLabel)==L"読取を正常に戻す");
+        SendMessageW(w,WM_COMMAND,MAKEWPARAM(994,BN_CLICKED),0);check(fixture.takeCardFaultRequest(0)==false);
+        fixture.data["media_cards"][0]["pending"]=false;fixture.data["media_cards"][1].erase("read_fault");fixture.syncCardButtons(w);
+        check(!IsWindowEnabled(GetDlgItem(w,995))); // Unsupported client remains safely disabled.
+        check(!fixture.cardState(0,now+2001).value("available",true));check(fixture.cardState(0,now+2001).at("units").is_null());
+        fixture.data["media_cards"][0]["save_failed"]=true;fixture.data["media_cards"][1]["configured"]=false;fixture.syncCardButtons(w);
+        check(!IsWindowEnabled(GetDlgItem(w,992))&&!IsWindowEnabled(GetDlgItem(w,993)));
+        for(int id:{990,991,992,993,994,995,996,997}){RECT bounds{};GetWindowRect(GetDlgItem(w,id),&bounds);MapWindowPoints(nullptr,w,reinterpret_cast<POINT*>(&bounds),2);
+            check(bounds.left>=0&&bounds.right<=1080&&bounds.top>=0&&bounds.bottom<=880);}
         DestroyWindow(w);
     }
 #endif
     XbandDashboard(){worker=std::thread([this]{WNDCLASSW c{};c.lpfnWndProc=proc;c.hInstance=GetModuleHandleW(nullptr);c.lpszClassName=L"XbandDashboard";c.hCursor=LoadCursor(nullptr,IDC_ARROW);RegisterClassW(&c);
-        HWND w=CreateWindowW(c.lpszClassName,L"XBANDサーバー | 通信モニター",WS_OVERLAPPEDWINDOW|WS_CLIPCHILDREN,CW_USEDEFAULT,CW_USEDEFAULT,1100,850,nullptr,nullptr,c.hInstance,this);hwnd=w;if(w){ShowWindow(w,SW_SHOWNOACTIVATE);SetTimer(w,1,250,nullptr);}ready=true;if(!w)return;MSG msg;while(GetMessage(&msg,nullptr,0,0)>0){TranslateMessage(&msg);DispatchMessage(&msg);}});while(!ready)Sleep(1);if(!hwnd){worker.join();throw std::runtime_error("Dashboard creation failed");}}
+        HWND w=CreateWindowW(c.lpszClassName,L"XBANDサーバー | 通信モニター",WS_OVERLAPPEDWINDOW|WS_CLIPCHILDREN,CW_USEDEFAULT,CW_USEDEFAULT,1100,930,nullptr,nullptr,c.hInstance,this);hwnd=w;if(w){ShowWindow(w,SW_SHOWNOACTIVATE);SetTimer(w,1,250,nullptr);}ready=true;if(!w)return;MSG msg;while(GetMessage(&msg,nullptr,0,0)>0){TranslateMessage(&msg);DispatchMessage(&msg);}});while(!ready)Sleep(1);if(!hwnd){worker.join();throw std::runtime_error("Dashboard creation failed");}}
     ~XbandDashboard(){if(auto w=hwnd.load())PostMessage(w,WM_CLOSE,0,0);if(worker.joinable())worker.join();}
     bool isClosed()const{return closed;}
     void publish(const J&v){std::lock_guard lock(mutex);const auto now=GetTickCount64();const auto&p=v.at("pair_control");

@@ -3,8 +3,9 @@
 #include "standby_wait_settings.hpp"
 namespace diagnostic {
 // Local policy, not a reconstruction of the original population-based estimate.
-// Defaults preserve the former rounded durations (1/2/4 minutes). Settings
-// are server-wide; the ROM sends only the selected index, not a duration.
+// Defaults are short5/normal10/long12 minutes; only normal10 is confirmed
+// by the supplied historical page. Settings are server-wide; the game
+// sends only the selected index, not a duration.
 inline uint32_t vfStandbyWaitTicks(uint8_t preference){
     return activeStandbyWait?activeStandbyWait->ticks(preference):standbyWaitTicks(preference);
 }

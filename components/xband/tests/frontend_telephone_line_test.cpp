@@ -31,6 +31,7 @@ int main()try{
     auto saturn=std::make_unique<ymir::Saturn>();saturn->Reset(true);modem.attach(*saturn);
     const auto cardPath=std::filesystem::temp_directory_path()/("xband-line-card-"+std::to_string(GetCurrentProcessId())+"-"+std::to_string(GetTickCount64()))/"card.bin";
     const xband::ymir_adapter::VirtualCardStorage::Image card={1,2,3,4,5,6,7,0,0,0,1,15,15};
+    auto expectedCard=card;
     {xband::ymir_adapter::VirtualCardStorage seed(cardPath);seed.save(card);}
     modem.configureVirtualCard(cardPath,true);
     std::ostringstream initial;modem.dumpFlash(initial);
@@ -47,6 +48,49 @@ int main()try{
     pair->setTelephoneLine(0,false);service.setAccepting(false);modem.request(config);
     pump([&]{return !modem.snapshot().telephoneLineConnected;});
     check(saturn->mainBus.Read<uint8_t>(0x05885029)==0x11&&modem.snapshot().virtualCardInserted);
+    pump([&]{return pair->mediaCards[0].snapshot(GetTickCount64()).value("available",false);});
+    check(modem.snapshot().virtualCardUnits==100);
+    check(pair->mediaCards[0].snapshot(GetTickCount64()).at("units")==100);
+    check(pair->mediaCards[0].request(false,GetTickCount64()));
+    pump([&]{return !modem.snapshot().virtualCardInserted&&pair->mediaCards[0].pending(GetTickCount64()).is_null();});
+    check(!(saturn->mainBus.Read<uint8_t>(0x05885025)&0x10)&&modem.snapshot().virtualCardUnits==100);
+    check(pair->mediaCards[0].request(true,GetTickCount64()));
+    pump([&]{return modem.snapshot().virtualCardInserted&&pair->mediaCards[0].pending(GetTickCount64()).is_null();});
+    check((saturn->mainBus.Read<uint8_t>(0x05885025)&0x10)&&modem.snapshot().virtualCardUnits==100);
+    // Existing settings UI and server controls use one insertion API. A later
+    // local removal must not be overwritten by a repeated acknowledged token.
+    modem.requestCardInsertion(false);pump([&]{return !modem.snapshot().virtualCardInserted;});
+    for(unsigned i=0;i<8;++i)pump([&]{return true;});check(!modem.snapshot().virtualCardInserted);
+    modem.requestCardInsertion(true);pump([&]{return modem.snapshot().virtualCardInserted;});
+    // Drive the real mapped card pins: clear one unit in the last byte.
+    const auto cardPin=[&](uint8_t value){saturn->mainBus.Write<uint8_t>(0x05885021,value);};
+    cardPin(0x8d);cardPin(0x81);for(unsigned i=0;i<100;++i){cardPin(0x85);cardPin(0x81);}cardPin(0x89);cardPin(0x81);
+    expectedCard[12]=7;
+    pump([&]{return modem.snapshot().virtualCardUnits==99&&pair->mediaCards[0].snapshot(GetTickCount64()).at("units")==99;});
+    check(pair->mediaCards[0].request(false,GetTickCount64()));
+    pump([&]{return !modem.snapshot().virtualCardInserted&&pair->mediaCards[0].pending(GetTickCount64()).is_null();});
+    check(modem.snapshot().virtualCardUnits==99);
+    check(pair->mediaCards[0].request(true,GetTickCount64()));
+    pump([&]{return modem.snapshot().virtualCardInserted&&pair->mediaCards[0].pending(GetTickCount64()).is_null();});
+    check(modem.snapshot().virtualCardUnits==99); // Reinsert does not refill.
+    check(pair->mediaCards[0].requestReadFault(true,GetTickCount64()));
+    pump([&]{return modem.snapshot().virtualCardReadFault&&pair->mediaCards[0].pending(GetTickCount64()).is_null();});
+    check(modem.snapshot().virtualCardInserted&&!modem.snapshot().virtualCardUnits);
+    check(pair->mediaCards[0].matchAdmission(GetTickCount64())==xband::CardMatchAdmission::unreadable);
+    check((saturn->mainBus.Read<uint8_t>(0x05885025)&0x11)==0x11); // Present but chip gives no readable data.
+    cardPin(0x8d);cardPin(0x81);for(unsigned i=0;i<104;++i){
+        check((saturn->mainBus.Read<uint8_t>(0x05885025)&0x11)==0x11);
+        cardPin(0x85);cardPin(0x81);cardPin(0x89);cardPin(0x81);
+    }
+    for(bool hard:{false,true}){
+        if(hard)modem.hardReset();else modem.softReset();saturn->Reset(hard);
+        check(modem.snapshot().virtualCardInserted&&modem.snapshot().virtualCardReadFault);
+        pump([&]{return pair->mediaCards[0].snapshot(GetTickCount64()).value("available",false);});
+    }
+    check(pair->mediaCards[0].requestReadFault(false,GetTickCount64()));
+    pump([&]{return !modem.snapshot().virtualCardReadFault&&modem.snapshot().virtualCardUnits==99&&pair->mediaCards[0].pending(GetTickCount64()).is_null();});
+    {std::ifstream input(cardPath,std::ios::binary);decltype(expectedCard) persisted{};
+     input.read(reinterpret_cast<char*>(persisted.data()),persisted.size());check(bool(input)&&persisted==expectedCard);}
     at("AT\r");check(reply().find("OK")!=std::string::npos);
     at("ATZ\r");check(reply().find("OK")!=std::string::npos);
     at("ATS91=15S92=15DT0120717360\r");check(reply().find("NO CARRIER")!=std::string::npos);
@@ -143,6 +187,20 @@ int main()try{
     at("ATZ\r");check(reply().find("OK")!=std::string::npos);
     at("ATS91=15S92=15DT0120717360\r");pump([&]{return modem.snapshot().carrier;});(void)reply();
     // A diagnostic timeline fault blocks unsafe network work, not board power.
+    // Hot swap during an active service call: no modem reset/hang-up, actual
+    // card-OFF interval, different persistent image, old balance preserved.
+    const auto swappedPath=cardPath.parent_path()/"swapped.bin";
+    auto newCard=card;newCard[8]=newCard[9]=newCard[10]=0;newCard[11]=63;newCard[12]=3; //50
+    {xband::ymir_adapter::VirtualCardStorage seed(swappedPath);seed.save(newCard);}
+    const auto swapUTF8=swappedPath.u8string();
+    check(pair->mediaCards[0].requestImage(std::string(reinterpret_cast<const char*>(swapUTF8.data()),swapUTF8.size()),GetTickCount64()));
+    pump([&]{return !modem.snapshot().virtualCardInserted&&modem.snapshot().virtualCardUnits==50;});
+    check(modem.snapshot().carrier&&modem.snapshot().telephoneLineConnected);
+    modem.frameCompleted();pump([&]{return modem.snapshot().virtualCardInserted;});
+    check(modem.snapshot().virtualCardUnits==50&&modem.snapshot().carrier);
+    modem.requestCardImage(cardPath);pump([&]{return !modem.snapshot().virtualCardInserted&&modem.snapshot().virtualCardUnits==99;});
+    modem.frameCompleted();pump([&]{return modem.snapshot().virtualCardInserted;});
+    check(modem.snapshot().carrier&&modem.snapshot().virtualCardUnits==99);
     (void)modem.budget(0,0);(void)modem.budget(0,1);
     check(modem.snapshot().enabled&&!modem.snapshot().carrier&&modem.snapshot().virtualCardInserted);
     (void)reply();at("AT\r");check(reply().find("OK")!=std::string::npos);
@@ -150,7 +208,7 @@ int main()try{
     std::ostringstream after;modem.dumpFlash(after);check(initial.str()==after.str());
     modem.shutdown();std::ifstream saved(cardPath,std::ios::binary);
     xband::ymir_adapter::VirtualCardStorage::Image actual{};
-    saved.read(reinterpret_cast<char*>(actual.data()),actual.size());check(saved.gcount()==13&&actual==card);
+    saved.read(reinterpret_cast<char*>(actual.data()),actual.size());check(saved.gcount()==13&&actual==expectedCard);
     saturn.reset();
     std::cout<<"PASS real frontend: boot OFF, AT recognition, rejected dial, repeated ON/OFF, carrier loss, flash/card preserved\n";
 }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
