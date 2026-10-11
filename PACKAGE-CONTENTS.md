@@ -1,6 +1,6 @@
 # v0.5.0 パッケージ案内
 
-2026-10-11。Windows x64の公開開発版（Public prerelease）です。
+2026-10-12更新。Windows x64の公開開発版（Public prerelease）v0.5.0の差し替え版です。
 配布先は[GitHub v0.5.0](https://github.com/kksszz/Saturn-xband-server-modem-emulator/releases/tag/v0.5.0)です。
 XBANDとシリアル対戦の両方を含むソース統合キットで、追加DLLを置くだけのプラグインではありません。
 
@@ -17,7 +17,8 @@ XBANDとシリアル対戦の両方を含むソース統合キットで、追加
 
 YMIRの基準は`9a237ea6642912ae0833f691809aa47dc27f908d`、Mednafenは公式1.32.1です。
 通常版をそのまま起動するだけでは通信機能は追加されません。未変更の基準ソースに差分を適用して
-各ガイドに従いビルドします。既存YMIR差分は維持し、外部XBAND部品を本版へ更新します。
+各ガイドに従いビルドします。外部XBAND部品を本版へ更新し、適用済みYMIRソースでは
+Subscriber欄の表示名・空欄接続許可の2行も確認して反映します。全差分を重ねて適用しません。
 MednafenのSCIは基礎XBAND差分の後に任意追加し、専用スクリプトで起動します。
 ケーブル起動の同期は既定ON（`-Synchronize 1`）、OFF比較は両側`-Synchronize 0`で再起動します。
 XBANDモデムと直接SCIケーブルは同時に使いません。
@@ -31,5 +32,9 @@ ZIPにはサーバーを再ビルドするためのソース・CMake・回帰試
 台帳、通信ログ、タイトル別Hotfixは含みません。付属スクリーンショットは文書用の動作例です。
 既存環境を上書きせず、新規フォルダーで準備し、更新前に保存データ一式をバックアップします。
 
-`manifest.json`は収録ファイルのサイズとSHA-256、`SHA256SUMS.txt`はZIPのSHA-256です。
+`manifest.json`は差し替え日（package_revision）・対応ソースコミット（source_commit）・
+収録ファイルのサイズとSHA-256、`SHA256SUMS.txt`はZIPのSHA-256です。
+2026-10-12版にはservice endpoint整理、peer endpoint指定、Subscriber制約整理、
+全10タイトルのID根拠・正式表示名、更新した仕様書・ガイド・今後の開発検討事項を収録します。
+「3台以上のモデムセッション」は検討事項であり、現在の対応は2台です。
 `verify-package.ps1 -Archive <ZIP> -ExpectedVersion v0.5.0`で収録境界とハッシュを再検査できます。

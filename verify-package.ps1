@@ -10,6 +10,8 @@ try {
     $taskReader=[IO.StreamReader]::new($taskManifestEntries[0].Open())
     try {$taskManifest=$taskReader.ReadToEnd() | ConvertFrom-Json} finally {$taskReader.Dispose()}
     if($taskManifest.version -ne $ExpectedVersion){throw 'Package version mismatch'}
+    if($taskManifest.source_commit -and $taskManifest.source_commit -notmatch '^[0-9a-f]{40}$'){throw 'Invalid source commit'}
+    if($taskManifest.package_revision -and $taskManifest.package_revision -notmatch '^\d{4}-\d{2}-\d{2}$'){throw 'Invalid package revision'}
     if(-not $taskManifest.server_source_included -or $taskManifest.ymir_included -or $taskManifest.mednafen_included -or $taskManifest.personal_data_included){throw 'Invalid distribution boundary'}
     $taskNames=@{}
     foreach($taskEntry in $taskEntries){
@@ -37,6 +39,12 @@ try {
     }
     foreach($taskRequired in @('bin/xband-server.exe','CMakeLists.txt','LICENSE','PACKAGE-CONTENTS.md','components/xband/CMakeLists.txt','components/xband/include/xband/modem_register_bank.hpp','components/xband/adapters/ymir/frontend_modem.cpp','components/xband/adapters/mednafen/command_runtime.cpp','components/xband/adapters/mednafen/cable_runtime.cpp','components/xband/adapters/mednafen/cable_core_test.inc','components/link-cable/CMakeLists.txt','components/link-cable/sci_state.hpp','components/link-cable/link_cable_service.cpp','components/link-cable/link_cable_sync.inc','outputs/live-capture-tests/pb3_service_server.cpp','docs/SERVER-MODEM-SPEC.md','docs/BATTLE-CABLE-SERIAL-SPEC.md','docs/YMIR-INTEGRATION-MANUAL.md','docs/MEDNAFEN-INTEGRATION-MANUAL.md','docs/EMULATOR-INTEGRATION-SPEC.md','integration/ymir/ymir-9a237ea-serial-xband.patch','integration/mednafen/mednafen-1.32.1-xband.patch','integration/mednafen/mednafen-1.32.1-link-cable.patch','integration/mednafen/start-link-cable.ps1','integration/mednafen/LINK-CABLE.md')){
         if(-not $taskNames.ContainsKey($taskRequired)){throw ('Required release input missing: '+$taskRequired)}
+    }
+    if($taskManifest.package_revision){
+        if(-not $taskManifest.source_commit){throw 'Revision package missing source commit'}
+        foreach($taskRequired in @('components/xband/include/xband/service_identity.hpp','components/xband/include/xband/peer_route.hpp','docs/SERVICE-ENDPOINT-RENAME-VERIFICATION.md','docs/PEER-ROUTING-CATALOG-VERIFICATION.md','outputs/live-capture-tests/peer_route_control_test.cpp')){
+            if(-not $taskNames.ContainsKey($taskRequired)){throw ('Revision input missing: '+$taskRequired)}
+        }
     }
     Write-Output ('Verified '+$taskManifest.files.Count+' files: hashes, required sources/guides, and distribution exclusions')
 } finally {$taskZip.Dispose()}
