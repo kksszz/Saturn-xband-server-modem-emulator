@@ -16,7 +16,7 @@
 
 最新XBAND・シリアル対戦、YMIR／Mednafen組み込み用ソース・差分・各ガイド・仕様書をまとめた[公開開発版v0.5.0](https://github.com/kksszz/Saturn-xband-server-modem-emulator/releases/tag/v0.5.0)です。[収録内容と入口](PACKAGE-CONTENTS.md)と[検証記録](docs/RELEASE-VERIFICATION.md)を参照してください。ZIPにはサーバー再ビルド用ソースと回帰試験も含みます。旧v0.4.0は上書きしません。
 
-SH-2 SCI対戦ケーブルの[Mednafen任意追加キット](integration/mednafen/LINK-CABLE.md)も用意しました。YLS1の共通TCP部品を維持し、ホストのSCI・DMA・IRQ・実行同期を結線します。通常はOFF、XBANDカートと排他、同一PC試験用です。Daytona USA Circuit Editionの動作確認完了とゲボッカーズでの安定動作の報告を受けました。異種エミュレーター対戦は未確認です。
+SH-2 SCI対戦ケーブルの[Mednafen任意追加キット](integration/mednafen/LINK-CABLE.md)も用意しました。YLS1の共通TCP部品を維持し、ホストのSCI・DMA・IRQ・実行同期を結線します。通常はOFF、XBANDカートと排他、同一PC試験用です。
 
 Mednafen 1.32.1用の[ソース取り込みキット](integration/mednafen/README.md)を追加しました。共通モデム部品を維持し、ホスト側のバス・IRQ・クロック・保存・ポーリングを個別アダプターで結線します。新規環境では度数処理を有効化し、Mednafenの新規カードは100度数（YMIR起動時は自動作成・挿入なし）、ゲームの勝敗ポイントは+1／0です。保存済み設定と残高は保持します。2026-10-11のMednafen試験構成で通常各3度数、勝者+1／敗者0、再接続で二重計上なし、メール送信課金・受信無料をユーザー確認しました。公開済みv0.4.0の内容は変更していません。
 
