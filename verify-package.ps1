@@ -22,7 +22,7 @@ try {
         $taskNames[$taskName]=$taskEntry
         if($taskName -match '(?i)(^|/)(runtime|profiles?|sav|mail-journal|communication-logs|activity-history|game-result-db)(/|$)' -or $taskName -match '(?i)\.(bin|cue|iso|chd|ssz|dll|pdb|log|jsonl|pending)$'){throw ('Forbidden private/emulator input: '+$taskName)}
         if($taskName -match '(?i)\.exe$' -and $taskName -ne 'bin/xband-server.exe'){throw 'Unexpected emulator/tool executable'}
-        if($taskName -match '(?i)\.(png|jpg|bmp)$' -and $taskName -ne 'docs/images/vf-remix-xband-mednafen.png'){throw 'Unexpected image asset'}
+        if($taskName -match '(?i)\.(png|jpg|bmp)$' -and $taskName -notin @('docs/images/vf-remix-xband-mednafen.png','docs/images/xband-server-ui.png')){throw 'Unexpected image asset'}
         if($taskName -match '(?i)\.json$' -and $taskName -notin @('manifest.json','config/jp-area-codes.json','config/service-credit-defaults.json','components/xband/tests/fixtures/server-config.json','integration/mednafen/baseline-files.json','integration/mednafen/link-cable-baseline-files.json')){throw ('Unexpected data file: '+$taskName)}
     }
     if($taskManifest.files.Count+1 -ne $taskEntries.Count){throw 'Unmanifested or missing files'}

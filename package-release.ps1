@@ -51,6 +51,7 @@ foreach($taskIntegration in Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot 
     $taskMapping[$taskRelative]=$taskRelative
 }
 $taskMapping['docs/images/vf-remix-xband-mednafen.png']='docs/images/vf-remix-xband-mednafen.png'
+$taskMapping['docs/images/xband-server-ui.png']='docs/images/xband-server-ui.png'
 foreach($taskCable in Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot 'components/link-cable') -File){
     if($taskCable.Extension -notin @('.h','.hpp','.cpp','.inc','.md') -and $taskCable.Name -ne 'CMakeLists.txt'){continue}
     $taskRelative='components/link-cable/'+$taskCable.Name
