@@ -255,7 +255,7 @@ int main(){
  const auto renewalSettled=GetTickCount64()+80;
  pumpPeers([&]{return GetTickCount64()>=renewalSettled;});
  pair->roles->caller=0;
- feed(peers[0],"ATS91=15S92=15DT3336666665\r");ringing.clear();
+ feed(peers[0],"ATS91=15S92=15DT0312345679\r");ringing.clear();
  pumpPeers([&]{ringing+=drain(peers[1]);return ringing.find("RING")!=std::string::npos;});
  feed(peers[1],"ATA\r");
  pumpPeers([&]{return xband_command_peer(peers[0])&&xband_command_peer(peers[1]);});
@@ -278,7 +278,7 @@ int main(){
  const auto thirdSettled=GetTickCount64()+80;
  pumpPeers([&]{return GetTickCount64()>=thirdSettled;});
  pair->roles->caller=0;
- feed(peers[0],"ATS91=15S92=15DT3336666665\r");ringing.clear();
+ feed(peers[0],"ATS91=15S92=15DT0312345679\r");ringing.clear();
  pumpPeers([&]{ringing+=drain(peers[1]);return ringing.find("RING")!=std::string::npos;});
  feed(peers[1],"ATA\r");
  pumpPeers([&]{return xband_command_peer(peers[0])&&xband_command_peer(peers[1]);});

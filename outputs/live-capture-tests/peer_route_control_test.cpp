@@ -23,29 +23,34 @@ struct Pair {
 }
 int main()try{
     for(unsigned side:{0u,1u}){
-        for(bool legacy:{false,true}){
-            Pair pair(side);J request{{"op","dial"},{"generation",pair.state->generation}};
-            if(legacy)request["number"]=xband::legacyPeerPhone(side);
-            else request["target"]=xband::pairedPeerEndpoint(side);
+        {
+            Pair pair(side);J request{{"op","dial"},{"generation",pair.state->generation},{"target",xband::pairedPeerEndpoint(side)}};
             check(command(pair.endpoint(side),request)["state"]==1);
             check(command(pair.endpoint(1-side),{{"op","answer"},{"generation",pair.state->generation}})["state"]==2);
         }
-        for(unsigned variant=0;variant<7;++variant){
+        for(unsigned variant=0;variant<8;++variant){
             Pair pair(side);J request{{"op","dial"},{"generation",pair.state->generation},{"target",xband::pairedPeerEndpoint(side)}};
             unsigned actor=side;
             if(variant==0)request["target"]=xband::peerEndpoint(side);
             if(variant==1)request["target"]="peer-2";
             if(variant==2)request.erase("generation");
             if(variant==3)request["generation"]=pair.state->generation+1;
-            if(variant==4)request["number"]=xband::legacyPeerPhone(side);
+            if(variant==4)request["number"]="0312345679";
             if(variant==5)actor=1-side;
             if(variant==6)pair.state->joined[1-side]=false;
+            if(variant==7){request.erase("target");request["number"]="0312345679";}
             bool denied=false;try{command(pair.endpoint(actor),request);}catch(const std::runtime_error&){denied=true;}
             check(denied&&pair.state->state==0);
+        }
+        {
+            Pair pair(side);
+            bool denied=false;try{command(pair.endpoint(side),{{"op","dial"},{"number","0312345679"}});}
+            catch(const std::runtime_error&){denied=true;}
+            check(denied&&pair.state->state==0); // No generation-less legacy route.
         }
         Pair stale(side);
         check(command(stale.endpoint(side),{{"op","dial"},{"generation",0},{"target",xband::pairedPeerEndpoint(side)}})["state"]==0);
     }
-    std::cout<<"PASS endpoint peer routing both directions; arbitrary account phones; legacy compatibility; role, generation, membership, target and ambiguous-route rejection\n";
+    std::cout<<"PASS endpoint-only peer routing both directions; arbitrary account phones; role, generation, membership and number-route rejection\n";
     return 0;
 }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}

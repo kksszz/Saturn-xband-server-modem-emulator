@@ -60,7 +60,7 @@ int main(int argc, char **argv) {
                 throw std::runtime_error("adapter timeout");
             };
             pump([&] { return control.state() == ClientControl::State::idle; });
-            check(control.open("003336666666", time) == Admission::queued, "adapter open");
+            check(control.open("000312345678", time) == Admission::queued, "adapter open");
             pump([&] { return control.state() == ClientControl::State::service; });
             const Json card{{"inserted", true}, {"read_state", "readable"}, {"number", "960500132270"}, {"remaining_units", 7}, {"nominal_units", 10}};
             check(control.snapshot(card, 0, 0, time) == Admission::queued, "adapter snapshot");

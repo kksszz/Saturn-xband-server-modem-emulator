@@ -8,7 +8,7 @@ int main(){try{
     const std::vector<uint8_t> sender{'8','8'},recipient{'9','9'};
     routes.observe("sender",sender);routes.observe("recipient",recipient);
     xband::MailCapture capture;
-    capture.sourceEndpoint="sender";capture.sourcePhone="3336666666";
+    capture.sourceEndpoint="sender";capture.sourcePhone="0312345678";
     capture.sourceCodename=sender;capture.fields={std::vector<uint8_t>{'9','9',0},
         std::vector<uint8_t>{'9','8',0},std::vector<uint8_t>{0,7}};
     for(uint64_t i=1;i<=6;++i)check(store.retain(capture)==i);

@@ -12,7 +12,7 @@ int main(){try{
                 const B prefix{0x1f,0x74,0x6a,0x30,0x34,0x0b};
                 std::copy(prefix.begin(),prefix.end(),request.begin());
                 request[22]=12;
-                const std::string phone="33366666665";
+                const std::string phone="03123456789";
                 std::copy(phone.begin(),phone.end(),request.begin()+23);
                 request[135]=0x1e;request[138]=100;T::putLong(request,139,cardLength);
                 if(cardLength){const B raw{0x0e,2,0x1d,0x20,0x15,0xff,0,0,0,0,1,15,15};

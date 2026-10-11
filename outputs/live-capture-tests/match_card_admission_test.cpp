@@ -31,6 +31,7 @@ B login(unsigned balance,unsigned code=3,uint32_t game=0x10003,bool present=true
 std::unique_ptr<PB3Service> service(const std::shared_ptr<PB3PairControl>& pair,unsigned side,B wire){
     auto s=std::make_unique<PB3Service>(side,std::make_shared<PB3Observation>(),pair->roles,false,false);
     s->setMatchCardAdmission([pair,side]{pair->enforceAdmission();return pair->cardAdmission(side,GetTickCount64());});
+    s->setPeerTelephone([side]{return side?"03-12345678":"03-12345679";});
     auto& p=s->testTCP();p.captured=std::move(wire);p.state=LocalTCPProbe::State::Established;p.serviceWindow=65535;
     p.gameIntroTitleReply={};p.gameMatchAwardReply={};p.regionTownReply={};p.usageAreaPreferenceReply={};p.usageAreaReply={};
     return s;
@@ -102,7 +103,7 @@ int main()try{
     }
     {
         Pair f;f.wait(0);auto d=f.p->registerStandby(1,"03223456789",0x10003,"22");check(d.result==xband::StandbyRegistration::Result::caller);
-        auto response=control(f.right,{{"op","dial"},{"generation",f.p->generation},{"number","3336666666"},{"media_card",report(0)}});
+        auto response=control(f.right,{{"op","dial"},{"generation",f.p->generation},{"target","peer-0"},{"media_card",report(0)}});
         check(response.at("closed")==true&&response.at("state")==0); // Removal/zero raced assignment: never ring peer.
     }
     {
@@ -121,10 +122,29 @@ int main()try{
         s->setPeerTelephone([]{return "03-12345679";});
         check(s->testTCP().prepareServiceReply());
         check(s->testTCP().diagnosticPeerNumber=="0312345679");
-        auto fallback=service(f.p,side,login(71));
-        fallback->setPeerTelephone([]{return std::string{};});
-        check(fallback->testTCP().prepareServiceReply());
-        check(fallback->testTCP().diagnosticPeerNumber==xband::legacyPeerPhone(side));
+        auto missing=service(f.p,side,login(71));
+        std::string number;
+        missing->setPeerTelephone([&number]{return number;});
+        check(!missing->testTCP().prepareServiceReply());
+        check(missing->testTCP().diagnosticPeerNumber.empty());
+        check(missing->testTCP().pollServiceReply().empty());
+        number="03-12345679";
+        check(missing->testTCP().prepareServiceReply());
+        check(missing->testTCP().diagnosticPeerNumber=="0312345679");
+        const auto packet=missing->testTCP().pollServiceReply();
+        check(packet.size()>52&&packet[40]==0x1d&&packet[41]==11);
+        check(std::string(packet.begin()+42,packet.begin()+52)=="0312345679");
+        number="invalid";
+        check(!missing->testTCP().prepareServiceReply());
+        check(missing->testTCP().diagnosticPeerNumber.empty()); // No stale destination.
+        auto noDirectory=service(f.p,side,login(71));
+        noDirectory->setPeerTelephone({});
+        check(!noDirectory->testTCP().prepareServiceReply());
+        check(noDirectory->testTCP().diagnosticPeerNumber.empty()); // No default fixture number.
+        auto receiver=service(f.p,1-side,login(71));
+        receiver->setPeerTelephone([]{return std::string{};});
+        check(receiver->testTCP().prepareServiceReply());
+        check(receiver->testTCP().replyReceiverCandidate&&receiver->testTCP().diagnosticPeerNumber.empty());
     }
     std::cout<<"PASS early card admission: no card/zero/unreadable/stale/pending removal, both sides, named/automatic waits, reinsert, pre-dial race, free receiving, 1/2 units, common game IDs\n";
 }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}

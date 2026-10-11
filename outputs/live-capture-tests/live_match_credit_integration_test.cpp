@@ -113,6 +113,7 @@ struct Fixture{
         else for(unsigned side=0;side<2;++side){
             registrations[side]=std::make_unique<PB3Service>(side,std::make_shared<PB3Observation>(),pair->roles,false,false);
             auto& service=*registrations[side];
+            service.setPeerTelephone([this,side]{return pair->activityContext[1-side].value("phone",std::string{});});
             service.setServiceCredits(settings,ledger);service.setMatchCredits(matches);
             // Optional history is intentionally absent. Billing still freezes context.
             service.setActivityHistory({},[this,side](const J& c){pair->activityContext[side]=c;return pair->generation;});
@@ -121,7 +122,7 @@ struct Fixture{
             check(pair->roles->requested[side]); // Actual production matching preparation.
         }
         check(pair->roles->caller==0);
-        control(left,{{"op","dial"},{"number","3336666665"},{"generation",pair->generation}});
+        control(left,{{"op","dial"},{"target","peer-1"},{"generation",pair->generation}});
         control(right,{{"op","answer"},{"generation",pair->generation}});
         check(pair->state==2);
     }
@@ -132,6 +133,7 @@ struct Fixture{
     }
     std::unique_ptr<PB3Service> service(unsigned side,const B& wire){
         auto s=std::make_unique<PB3Service>(side,std::make_shared<PB3Observation>(),pair->roles,false,false);
+        s->setPeerTelephone([this,side]{return pair->activityContext[1-side].value("phone",std::string{});});
         s->setServiceCredits(settings,ledger);s->setMatchCredits(matches);
         s->setLocalMailJournal(journal);
         s->setActivityHistory({},[this,side](const J& c){pair->activityContext[side]=c;return pair->generation;});
@@ -345,7 +347,7 @@ int main(){try{
         right.cardDebit.receive(reply(3,card(10,1)),0);
         (void)right.pollServiceReply();check(right.cardDebitReleased);
         (void)left.pollServiceReply();check(f.pair->roles->caller==0);
-        control(f.left,{{"op","dial"},{"number","3336666665"},{"generation",f.pair->generation}});
+        control(f.left,{{"op","dial"},{"target","peer-1"},{"generation",f.pair->generation}});
         control(f.right,{{"op","answer"},{"generation",f.pair->generation}});
         const auto next=f.matches->snapshot().at("match/2");
         check(next.at("phase")=="open"&&next.at("participants").at(0).at("card").at("value")==7&&

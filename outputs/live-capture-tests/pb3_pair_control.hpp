@@ -284,9 +284,7 @@ public:
             const bool endpointRoute=request.contains("target")&&!request.contains("number")&&
                 request.at("target")==xband::pairedPeerEndpoint(side)&&request.contains("generation")&&
                 request.at("generation")==pair->generation;
-            const bool legacyRoute=request.contains("number")&&!request.contains("target")&&
-                request.at("number")==std::string(xband::legacyPeerPhone(side));
-            if(side!=pair->roles->caller||pair->state!=0||!pair->joined[1-side]||(!endpointRoute&&!legacyRoute))
+            if(side!=pair->roles->caller||pair->state!=0||!pair->joined[1-side]||!endpointRoute)
                 throw std::runtime_error("invalid original peer dial");
             pair->state=1;
             pair->record(side,"dial");

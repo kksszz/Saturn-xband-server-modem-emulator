@@ -73,13 +73,13 @@ int main(int argc, char **argv) {
         const std::string_view name = argv[1]; auto p = std::make_unique<Pair>();
         if (name == "client_control_roundtrip") {
             p->exchange(1); check(p->client.state() == ClientControl::State::idle, "hello completed");
-            check(p->client.open("003336666666", 2) == Admission::queued, "open queued");
-            check(p->client.open("003336666665", 2) == Admission::inactive, "second open refused");
+            check(p->client.open("000312345678", 2) == Admission::queued, "open queued");
+            check(p->client.open("000312345679", 2) == Admission::inactive, "second open refused");
             p->exchange(2); check(p->client.call() == call_id, "server issued call");
             const auto original = card();
             check(p->client.snapshot(original, 12, 13, 3) == Admission::queued, "snapshot queued"); p->exchange(3);
             check(p->server.snapshot() && (*p->server.snapshot())["card"] == original && card() == original, "snapshot card unchanged");
-            check((*p->server.snapshot())["subscriber"] == "003336666666", "subscriber bound to call");
+            check((*p->server.snapshot())["subscriber"] == "000312345678", "subscriber bound to call");
             check(p->client.close(4) == Admission::queued, "close queued"); p->exchange(4);
             check(p->client.state() == ClientControl::State::idle && p->client.call().empty() && !p->server.snapshot(), "hangup cleared both sides");
         } else if (name == "client_data_roundtrip") {

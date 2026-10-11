@@ -114,10 +114,16 @@ class PB3Service final:public xband::ServiceEndpoint {
     std::function<void()> standbyAbort;
     std::function<bool(const std::string&)> namedTargetAccess;
     std::function<std::string()> peerTelephone;
-    void refreshPeerTelephone(){
-        if(!peerTelephone)return;
-        const auto number=xband::phoneDigits(peerTelephone());
-        if(!number.empty()&&number.size()<=24)p.tcp.diagnosticPeerNumber=number;
+    bool refreshPeerTelephone(){
+        // Never invent a destination or reuse a previously observed peer.
+        p.tcp.diagnosticPeerNumber.clear();
+        if(peerTelephone){
+            const auto number=xband::phoneDigits(peerTelephone());
+            if(!number.empty()&&number.size()<=24)p.tcp.diagnosticPeerNumber=number;
+        }
+        // Waiting receivers need no dial number. A caller must wait for the
+        // matched peer's registered telephone before publishing command 1D.
+        return p.tcp.replyReceiverCandidate||!p.tcp.diagnosticPeerNumber.empty();
     }
     bool standbyEngaged=false;
 #ifdef PB3_STANDBY_DIALOG
@@ -665,7 +671,7 @@ public:
         observation->mailMatched=observation->mailDeferred=0;
         observation->mailCaptureState=mailCaptures?"waiting":"disabled";
         if(mailProbe){p.tcp.replyState1D=false;p.tcp.replyPeerNumber=false;}
-        p.tcp.diagnosticPeerNumber=xband::legacyPeerPhone(side);
+        p.tcp.diagnosticPeerNumber.clear();
         p.tcp.prepareCardDebit=[this]{return prepareAutomaticMailDebit();};
         p.tcp.prepareCardDebitFailureReply=[this](const media_card::ServiceDebitExchange& exchange){
             if(!exchange.exhaustedShortfall())return LocalTCPProbe::Bytes{};
@@ -857,8 +863,8 @@ public:
                 std::cout<<"STANDBY_SERVICE_REPLY side="<<side<<" ticket="<<decision.ticket
                     <<" receiver="<<p.tcp.replyReceiverCandidate<<" wait="<<p.tcp.receiverWaitTicks
                     <<"; shared XBAND standby\n"<<std::flush;
+                if(!refreshPeerTelephone())return false;
                 prepareJournalMail(true);
-                refreshPeerTelephone();
                 return true;
             }
             const bool unassigned=roles->caller==2;
@@ -869,8 +875,8 @@ public:
             p.tcp.replyReceiverCandidate=side!=caller;
             p.tcp.receiverWaitTicks=side!=caller?1800:0;
             if(unassigned)std::cout<<"MATCH_ROLES source=complete_service_request caller="<<caller<<" callee="<<roles->callee()<<'\n'<<std::flush;
+            if(!refreshPeerTelephone())return false;
             prepareJournalMail(true);
-            refreshPeerTelephone();
             return true;
         };
     }

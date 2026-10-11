@@ -370,9 +370,9 @@ PPPは7E区切り、7DによるエスケープとXOR 20、16ビットFCSを使�
 
 応答の主なキーはstate、generation、transport、closed、recoverable、caller、callee、joined、finished、grant_end、bytes。待機対応時はstandby内にprotocol、ticket、state、gameも返す。pairのstateは0 idle、1 ringing、2 connected。sideは0と1、callerの2は未割当を表す。
 
-現行アダプターの対戦回線制御は `{"op":"dial","generation":現在の世代,"target":"peer-1"}`（side0）またはtargetが`peer-0`（side1）を送る。相手endpoint・発信役・世代を検査し、登録電話番号をルーティングキーにしない。旧クライアントの`number`指定だけは、side0から`3336666665`、side1から`3336666666`を互換別名として受け付ける。targetとnumberの併記は拒否する。
+現行アダプターの対戦回線制御は `{"op":"dial","generation":現在の世代,"target":"peer-1"}`（side0）またはtargetが`peer-0`（side1）を送る。相手endpoint・発信役・現在の世代・相手の参加状態を検査し、登録電話番号をルーティングキーにしない。`number`指定による発信は受け付けず、targetとnumberの併記も拒否する。旧クライアントの固定試験番号による互換発信経路は削除した。
 
-ゲームへのコマンド1Dには相手がゲーム内で登録した電話番号を返す。これはROMのAT発信用の数字列であり、peer endpointの文字列を渡すものではない。相手番号をまだ取得できない場合だけ旧仮想番号を互換用に返す。YMIRの`Config.phone`／Mednafenの`Subscriber`は外側wireの接続識別子であり、ゲーム内の本人番号・メールアカウントとは別である。保存済みの登録番号・メール・履歴を書き換えない。
+ゲームへのコマンド1Dには相手がゲーム内で登録した電話番号を返す。これはROMのAT発信用の数字列であり、peer endpointの文字列を渡すものではない。発信側で相手番号をまだ取得できない場合、または番号が不正な場合は応答を保留し、固定試験番号や以前の相手番号では代替しない。着信待機の応答には相手の発信番号は不要である。YMIRの`Config.phone`／Mednafenの`Subscriber`は外側wireの接続識別子であり、ゲーム内の本人番号・メールアカウントとは別である。保存済みの登録番号・メール・履歴を書き換えない。
 
 古いgenerationの制御は新しい対戦を変更せず状態照会へ落とす。未来世代は拒否する。closing中はclosed_ack以外で新規操作しない。回線切断を勝敗確定に使わず、結果20を別に扱う。
 
