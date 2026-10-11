@@ -1,4 +1,4 @@
-# Saturn XBAND Server / Modem Emulator + Battle Cable
+# Saturn XBAND Emulator + Battle Cable module
 
 ![構成図：中央上のサーバー、左右中央のモデム、左右下のエミュレーター内の接続モジュールは本リポジトリに含みます。青緑色が対象範囲、灰色のセガサターンエミュレーター本体は対象外です。](docs/images/system-architecture.svg)
 
