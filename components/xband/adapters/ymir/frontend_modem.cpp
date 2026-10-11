@@ -1,6 +1,7 @@
 #include "frontend_modem.hpp"
 #include <xband/windows_modem_service.hpp>
 #include <xband/service_identity.hpp>
+#include <xband/peer_route.hpp>
 #include <xband/modem_command_session.hpp>
 #include <xband/modem_service_buffer.hpp>
 #include <xband/peer_uart_timing.hpp>
@@ -159,7 +160,6 @@ struct FrontendModem::Impl {
             static_cast<unsigned long long>(sent),static_cast<unsigned long long>(received),status.c_str());
         std::fflush(stderr);
     }
-    static std::string digits(std::string_view s){std::string out;for(char c:s)if(c!='-')out+=c;return out;}
     bool reply(std::string_view text){if(bank.rx.size()+text.size()>256)return false;for(auto c:text)bank.rx.push_back(uint8_t(c));return true;}
     LocalDialRole dialRole(std::string_view number){
         if(standbyExperiment && saturn){
@@ -239,8 +239,7 @@ struct FrontendModem::Impl {
         if(!config.enabled)return;
         if(cardSaveFailed)throw std::runtime_error("Virtual card save failed; restart required, no retry");
         if(config.side<0||config.side>1||config.port<1||config.port>65530)throw std::invalid_argument("Invalid endpoint or port");
-        const auto expected=config.side?"3336666665":"3336666666";
-        if(digits(config.phone)!=expected)throw std::invalid_argument("Preview server requires phone 3336666666 (1) or 3336666665 (2)");
+        config.phone=localSubscriber(config.phone,unsigned(config.side));
         bank.resetUART();frame=0;sent=received=controlTick=generation=elapsed=end=0;
         idReads=uartReads=uartWrites=commands=0;traceFrame=~0u;
         peerSent=peerReceived=0;
@@ -303,7 +302,7 @@ struct FrontendModem::Impl {
                 }
                 if(unsigned(config.side)!=caller||!joined||pending.at("op")!="poll")throw std::runtime_error("Peer route not ready");
                 // Keep the internal protocol route separate from the entered number.
-                session->beginPeerDial();peerSessionTicket=session->ticket();peerDialing=true;pending={{"op","dial"},{"generation",generation},{"number",config.side?"3336666666":"3336666665"}};status="Dialing paired modem (number independent)";return true;
+                session->beginPeerDial();peerSessionTicket=session->ticket();peerDialing=true;pending={{"op","dial"},{"generation",generation},{"target",pairedPeerEndpoint(unsigned(config.side))}};status="Dialing paired modem (number independent)";return true;
             }
             if(decoded.kind==ATKind::answer){
                 if(!ring||unsigned(config.side)==caller)throw std::runtime_error("Answer without incoming call");
@@ -399,7 +398,7 @@ struct FrontendModem::Impl {
                 status="Peer route rejected; no carrier";
                 if(trace)std::fprintf(stderr,"XBAND_PEER_DIAL_REJECT side=%d frame=%u caller=%u\n",config.side,frame,caller);
             }else if(gateResult==PeerDialGate::Result::ready){
-                pending={{"op","dial"},{"generation",generation},{"number",config.side?"3336666666":"3336666665"}};
+                pending={{"op","dial"},{"generation",generation},{"target",pairedPeerEndpoint(unsigned(config.side))}};
                 status="Dialing paired modem (confirmed route)";
                 if(trace)std::fprintf(stderr,"XBAND_PEER_DIAL_CONFIRMED side=%d frame=%u generation=%llu\n",config.side,frame,static_cast<unsigned long long>(generation));
             }

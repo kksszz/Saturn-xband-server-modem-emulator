@@ -1,5 +1,6 @@
 #pragma once
 #include <xband/windows_modem_service.hpp>
+#include <xband/peer_route.hpp>
 #include <chrono>
 #include <cstdlib>
 #include "pb3_wait.hpp"
@@ -62,7 +63,7 @@ public:
     void open(){
         maintain();
         if(client->state()==Service::State::idle){
-            if(!client->open(side?"3336666665":"3336666666",now()))
+            if(!client->open(xband::localSubscriber({},side),now()))
                 throw std::runtime_error("PB3 remote open rejected");
             wait([&]{return client->state()==Service::State::connected;});
         }

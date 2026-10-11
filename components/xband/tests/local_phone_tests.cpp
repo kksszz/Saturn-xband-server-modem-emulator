@@ -1,10 +1,19 @@
 #include <xband/local_phone_policy.hpp>
+#include <xband/peer_route.hpp>
 #include <array>
 #include <algorithm>
 #include <iostream>
 void check(bool b){if(!b)throw std::runtime_error("phone policy test failed");}
 int main(){try{
     using namespace xband;
+    check(localSubscriber({},0)=="1"&&localSubscriber({},1)=="2");
+    check(localSubscriber("03-12345678",0)=="0312345678");
+    check(localSubscriber("3336666665",1)=="3336666665"); // Existing explicit subscribers remain valid.
+    check(pairedPeerEndpoint(0)=="peer-1"&&pairedPeerEndpoint(1)=="peer-0");
+    for(auto n:{"---","123X","123 456","123456789012345678901"}){
+        bool denied=false;try{(void)localSubscriber(n,0);}catch(const std::invalid_argument&){denied=true;}check(denied);
+    }
+    bool badSide=false;try{(void)pairedPeerEndpoint(2);}catch(const std::invalid_argument&){badSide=true;}check(badSide);
     for(auto n:{"03-12345678","03-33333333","12345678","33333333","3336666665","3336666666"})
         for(unsigned side=0;side<2;++side)check(localDialRole(n,side,false)==LocalDialRole::selfCheck);
     check(localDialRole("0120-717360",0,false)==LocalDialRole::service);

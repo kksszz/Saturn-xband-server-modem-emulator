@@ -43,7 +43,7 @@ struct LocalTCPProbe {
     Bytes rankingResultReply; // Opt-in server ledger update, command25 only.
     bool replyState1D=false;
     bool diagnosticZeroDebit=false; // Explicit synthetic all-zero card test only.
-    bool replyPeerNumber=false; // Fixed diagnostic sentinel, never a real dial target.
+    bool replyPeerNumber=false; // ROM numeric dial field; registered peer phone or compatibility fallback.
     bool replyReceiverCandidate=false; // Service-only 1C/0E hypothesis, NOT a verified receiving role.
     uint32_t receiverWaitTicks=0; // Diagnostic guest-clock units, not host milliseconds.
     Bytes standbyDialogReply; // Original command22, opt-in receiver-only notice.

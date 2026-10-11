@@ -1,5 +1,6 @@
 #pragma once
 #include <xband/service_endpoint.hpp>
+#include <xband/peer_route.hpp>
 #include <xband/async_modem_link.hpp>
 #include <xband/local_match_roles.hpp>
 #include <xband/standby_registration.hpp>
@@ -280,11 +281,16 @@ public:
             const auto limit=std::min(pair->stopAt,pair->elapsed[1-side]+4096);
             pair->grantEnd[side]=std::max(elapsed,std::min(elapsed+4096,limit));
         }else if(op=="dial"){
-            if(side!=pair->roles->caller||pair->state!=0||!pair->joined[1-side]||request.at("number")!=(side?"3336666666":"3336666665"))
+            const bool endpointRoute=request.contains("target")&&!request.contains("number")&&
+                request.at("target")==xband::pairedPeerEndpoint(side)&&request.contains("generation")&&
+                request.at("generation")==pair->generation;
+            const bool legacyRoute=request.contains("number")&&!request.contains("target")&&
+                request.at("number")==std::string(xband::legacyPeerPhone(side));
+            if(side!=pair->roles->caller||pair->state!=0||!pair->joined[1-side]||(!endpointRoute&&!legacyRoute))
                 throw std::runtime_error("invalid original peer dial");
             pair->state=1;
             pair->record(side,"dial");
-            std::cout<<"PAIR_ORIGINAL_DIAL side="<<side<<" target="<<(side?"3336666666":"3336666665")<<" generation="<<pair->generation<<'\n'<<std::flush;
+            std::cout<<"PAIR_ORIGINAL_DIAL side="<<side<<" target="<<xband::pairedPeerEndpoint(side)<<" generation="<<pair->generation<<'\n'<<std::flush;
         }else if(op=="answer"){
             if(side!=pair->roles->callee()||pair->state!=1||request.at("generation")!=pair->generation)
                 throw std::runtime_error("stale or unsolicited original answer");

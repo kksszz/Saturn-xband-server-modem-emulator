@@ -2244,9 +2244,9 @@ index 0000000..4b5be76
 +    ImGui::InputInt("Server base port",&m_modemPort);
 +    ImGui::Checkbox("Allow private LAN (plain TCP)",&m_modemLAN);
 +    ImGui::Combo("Modem endpoint",&m_modemSide,"Saturn 1\0Saturn 2\0");
-+    ImGui::InputText("Own telephone number",m_modemPhone,sizeof(m_modemPhone));
++    ImGui::InputText("Subscriber number (optional)",m_modemPhone,sizeof(m_modemPhone));
 +    ImGui::EndDisabled();
-+    ImGui::BeginDisabled(!modemState.enabled && m_modemPhone[0]=='\0');
++    ImGui::BeginDisabled(false); // Empty subscriber uses the endpoint-local ID.
 +    if(ImGui::Button(modemState.enabled?"Disconnect modem":"Connect modem")){
 +        ::xband::ymir_adapter::FrontendModem::Config config;
 +        config.enabled=!modemState.enabled;config.address=m_modemHost;config.port=m_modemPort;

@@ -11,7 +11,8 @@ namespace xband::ymir_adapter {
 // this owner before Saturn; attach while stopped, then pump on emulator thread.
 class FrontendModem {
 public:
-    struct Config {bool enabled=false,allowLAN=false;int side=0,port=58240;std::string address="127.0.0.1",phone="3336666666";};
+    // phone is the optional transport subscriber, not a peer routing address.
+    struct Config {bool enabled=false,allowLAN=false;int side=0,port=58240;std::string address="127.0.0.1",phone;};
     struct Snapshot {bool enabled=false,carrier=false;unsigned frame=0;uint64_t sent=0,received=0;std::string status="Disabled";bool virtualCardConfigured=false,virtualCardInserted=false;bool telephoneLineConnected=true;std::optional<int32_t> virtualCardUnits;bool virtualCardSaveFailed=false,virtualCardReadFault=false;};
     FrontendModem();~FrontendModem();
     void attach(ymir::Saturn &saturn);

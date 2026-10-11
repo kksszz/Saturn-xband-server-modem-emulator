@@ -2,6 +2,7 @@
 #include "card_runtime.h"
 #include <xband/windows_modem_service.hpp>
 #include <xband/service_identity.hpp>
+#include <xband/peer_route.hpp>
 #include <xband/modem_service_buffer.hpp>
 #include <xband/modem_command_session.hpp>
 #include <xband/local_phone_policy.hpp>
@@ -226,7 +227,7 @@ struct XbandCommandRuntime {
             }
             const auto gate=dialGate.observe(generation,frame,side,caller,bothJoined,!peerNotice,response.at("closed").get<bool>());
             if(gate==xband::PeerDialGate::Result::ready){
-                peerNotice=nlohmann::json{{"op","dial"},{"generation",generation},{"number",side?"3336666666":"3336666665"}};
+                peerNotice=nlohmann::json{{"op","dial"},{"generation",generation},{"target",xband::pairedPeerEndpoint(side)}};
                 if(log)log("ORIGINAL PEER DIAL ROUTE CONFIRMED");
             }else if(gate==xband::PeerDialGate::Result::reject){peerDialing=false;session->disconnectedIfCurrent(peerTicket,frame);}
             if(!response.at("closed").get<bool>()&&state==1&&caller<2&&caller!=side&&!peerDialing&&!peer&&
@@ -402,7 +403,7 @@ extern "C" int xband_command_failed(const XbandCommandRuntime* r){return !r||r->
 extern "C" int xband_command_configure_service(XbandCommandRuntime* r,uint16_t port,const char* subscriber){
     try{
         if(!r||r->service||r->buffer.state()!=xband::ModemServiceBuffer::State::idle||port<1024||!subscriber)return 0;
-        const auto digits=xband::phoneDigits(subscriber);if(digits.empty())return 0;
+        const auto digits=xband::phoneDigits(subscriber);if(digits.empty()||digits.size()>20)return 0;
         r->port=port;r->subscriber=digits;return 1;
     }catch(...){return 0;}
 }

@@ -12,6 +12,8 @@ int main(){try{
     diagnostic::GameRankingSettings defaults(directory/"absent.json");
     auto rows=defaults.snapshot();
     check(rows[0].gameID==0x10003&&rows[0].slot==1&&rows[0].fields[0]==rankingTitle);
+    check(rows[2].gameID==0x18002&&rows[2].fields[0]=="PUZZLE BOBBLE 3");
+    check(rows[5].gameID==0x10004&&rows[5].fields[0]=="SEGA RALLY CHAMPIONSHIP PLUS");
     check(diagnostic::rankingEUC(title)==encoded);
     auto intro=defaults.introTitleWire(0x10003);
     check(intro==std::vector<uint8_t>({0x32,0,0x8b,0,0,0,10,'V','F',0x85,' ','R','e','m','i','x',0}));
@@ -47,6 +49,15 @@ int main(){try{
     document["games"][0]["fields"][0]="CUSTOM VF";write();
     diagnostic::GameRankingSettings custom(path);
     check(custom.snapshot()[0].fields[0]=="CUSTOM VF");
+    document["games"][2]["fields"][0]="ID 0x00018002";
+    document["games"][5]["fields"][0]="ID 0x00010004";write();
+    diagnostic::GameRankingSettings renamed(path);
+    check(renamed.snapshot()[2].fields[0]=="PUZZLE BOBBLE 3"&&renamed.snapshot()[5].fields[0]=="SEGA RALLY CHAMPIONSHIP PLUS");
+    check(renamed.snapshot()[2].winPoints==rows[2].winPoints&&renamed.snapshot()[5].fields[2]==rows[5].fields[2]);
+    {nlohmann::json saved;std::ifstream in(path);in>>saved;check(saved==document);}
+    document["games"][2]["fields"][0]="CUSTOM PB";document["games"][5]["fields"][0]="CUSTOM RALLY";write();
+    diagnostic::GameRankingSettings ownNames(path);
+    check(ownNames.snapshot()[2].fields[0]=="CUSTOM PB"&&ownNames.snapshot()[5].fields[0]=="CUSTOM RALLY");
     const auto customIntro=custom.introTitleWire(0x10003);
     check(std::string(reinterpret_cast<const char*>(customIntro.data()+7))=="CUSTOM VF");
     // Clean up only files in this test's unique temporary directory.

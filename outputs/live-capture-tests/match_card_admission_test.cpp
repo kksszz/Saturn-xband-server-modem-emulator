@@ -115,5 +115,16 @@ int main()try{
         Pair f;f.p->state=2;f.p->roles->caller=0;f.observe(0,report(71,false));
         check(f.p->state==2&&!f.p->closing); // Existing game owns its disconnect/card-error lifecycle.
     }
+    for(unsigned side:{0u,1u}) {
+        Pair f;f.p->roles->requested={true,true};f.p->roles->caller=side;
+        auto s=service(f.p,side,login(71));
+        s->setPeerTelephone([]{return "03-12345679";});
+        check(s->testTCP().prepareServiceReply());
+        check(s->testTCP().diagnosticPeerNumber=="0312345679");
+        auto fallback=service(f.p,side,login(71));
+        fallback->setPeerTelephone([]{return std::string{};});
+        check(fallback->testTCP().prepareServiceReply());
+        check(fallback->testTCP().diagnosticPeerNumber==xband::legacyPeerPhone(side));
+    }
     std::cout<<"PASS early card admission: no card/zero/unreadable/stale/pending removal, both sides, named/automatic waits, reinsert, pre-dial race, free receiving, 1/2 units, common game IDs\n";
 }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}

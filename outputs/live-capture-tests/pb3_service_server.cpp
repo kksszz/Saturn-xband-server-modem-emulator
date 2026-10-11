@@ -1,6 +1,7 @@
 #include <xband/windows_tcp_host.hpp>
 #include "communication_log.hpp"
 #include <xband/local_phone_policy.hpp>
+#include <xband/peer_route.hpp>
 #include <xband/local_match_roles.hpp>
 #include <xband/standby_registration.hpp>
 #include <xband/media_card_control.hpp>
@@ -112,6 +113,12 @@ class PB3Service final:public xband::ServiceEndpoint {
     std::function<xband::StandbyRegistration::Decision(const std::string&,uint32_t,const std::string&,const std::string&)> namedStandbyRequest;
     std::function<void()> standbyAbort;
     std::function<bool(const std::string&)> namedTargetAccess;
+    std::function<std::string()> peerTelephone;
+    void refreshPeerTelephone(){
+        if(!peerTelephone)return;
+        const auto number=xband::phoneDigits(peerTelephone());
+        if(!number.empty()&&number.size()<=24)p.tcp.diagnosticPeerNumber=number;
+    }
     bool standbyEngaged=false;
 #ifdef PB3_STANDBY_DIALOG
     std::optional<uint32_t> standbyWaitSnapshot;
@@ -658,7 +665,7 @@ public:
         observation->mailMatched=observation->mailDeferred=0;
         observation->mailCaptureState=mailCaptures?"waiting":"disabled";
         if(mailProbe){p.tcp.replyState1D=false;p.tcp.replyPeerNumber=false;}
-        p.tcp.diagnosticPeerNumber=side?"3336666666":"3336666665";
+        p.tcp.diagnosticPeerNumber=xband::legacyPeerPhone(side);
         p.tcp.prepareCardDebit=[this]{return prepareAutomaticMailDebit();};
         p.tcp.prepareCardDebitFailureReply=[this](const media_card::ServiceDebitExchange& exchange){
             if(!exchange.exhaustedShortfall())return LocalTCPProbe::Bytes{};
@@ -851,6 +858,7 @@ public:
                     <<" receiver="<<p.tcp.replyReceiverCandidate<<" wait="<<p.tcp.receiverWaitTicks
                     <<"; shared XBAND standby\n"<<std::flush;
                 prepareJournalMail(true);
+                refreshPeerTelephone();
                 return true;
             }
             const bool unassigned=roles->caller==2;
@@ -862,6 +870,7 @@ public:
             p.tcp.receiverWaitTicks=side!=caller?1800:0;
             if(unassigned)std::cout<<"MATCH_ROLES source=complete_service_request caller="<<caller<<" callee="<<roles->callee()<<'\n'<<std::flush;
             prepareJournalMail(true);
+            refreshPeerTelephone();
             return true;
         };
     }
@@ -1144,6 +1153,7 @@ void reset()override{interruptReviewedReset();if(cardTrials){publishCardTrial();
                              std::function<void()> abort){standbyRequest=std::move(request);standbyAbort=std::move(abort);}
     void setNamedStandbyCallback(std::function<xband::StandbyRegistration::Decision(const std::string&,uint32_t,const std::string&,const std::string&)> request){namedStandbyRequest=std::move(request);}
     void setNamedTargetAccess(std::function<bool(const std::string&)> check){namedTargetAccess=std::move(check);}
+    void setPeerTelephone(std::function<std::string()> value){peerTelephone=std::move(value);}
 #ifdef PB3_SERVICE_SERVER_TEST
     LocalTCPProbe &testTCP(){return p.tcp;}
     void testRecordRequest(uint8_t code){recordRequest(code);}
@@ -1450,6 +1460,10 @@ int main(){try{
             );
 #ifdef PB3_PAIR_CONTROL
             endpoint->setMatchCardAdmission([pair,i]{pair->enforceAdmission();return pair->cardAdmission(i,GetTickCount64());});
+            endpoint->setPeerTelephone([pair,i]{
+                const auto& entry=pair->standby.entry(1-i);
+                return entry?entry->phone:pair->activityContext[1-i].value("phone",std::string{});
+            });
             if(pair->standbyEnabled)endpoint->setStandbyCallbacks(
                 [pair,i](const std::string& phone,uint32_t game){return pair->registerStandby(i,phone,game);},
                 [pair,i]{pair->abortStandbyService(i);});

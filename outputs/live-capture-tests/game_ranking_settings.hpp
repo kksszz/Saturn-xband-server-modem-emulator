@@ -75,10 +75,10 @@ inline constexpr int newGameDefaultWinPoints=1,newGameDefaultLosePoints=0;
 inline std::vector<GameRankingRow> rankingDefaults(){return {
     {0x00010003,1,{rankingUTF8(L"Virtua Fighter\u2122 Remix"),rankingUTF8(L"\u4e94\u6bb5"),"2156",rankingUTF8(L"\u516d\u6bb5"),"2844"},newGameDefaultWinPoints,newGameDefaultLosePoints},
     {0x00018003,2,{"PUYO PUYO SUN",rankingUTF8(L"17\u7d1a"),"13",rankingUTF8(L"16\u7d1a"),"7"},newGameDefaultWinPoints,newGameDefaultLosePoints},
-    {0x00018002,3,{"ID 0x00018002","LEVEL 1","100","LEVEL 2","50"},newGameDefaultWinPoints,newGameDefaultLosePoints},
+    {0x00018002,3,{"PUZZLE BOBBLE 3","LEVEL 1","100","LEVEL 2","50"},newGameDefaultWinPoints,newGameDefaultLosePoints},
     {0x00010007,4,{"DECATHLETE XBAND","LEVEL 1","0","LEVEL 2","200"},newGameDefaultWinPoints,newGameDefaultLosePoints},
     {0x00010006,5,{"DAYTONA USA CIRCUIT EDITION","LEVEL 1","0","LEVEL 2","200"},newGameDefaultWinPoints,newGameDefaultLosePoints},
-    {0x00010004,6,{"ID 0x00010004","LEVEL 1","100","LEVEL 2","50"},newGameDefaultWinPoints,newGameDefaultLosePoints},
+    {0x00010004,6,{"SEGA RALLY CHAMPIONSHIP PLUS","LEVEL 1","100","LEVEL 2","50"},newGameDefaultWinPoints,newGameDefaultLosePoints},
     {0x00018001,7,{"SATURN BOMBERMAN","LEVEL 1","0","LEVEL 2","200"},newGameDefaultWinPoints,newGameDefaultLosePoints},
     {0x00010005,8,{"VIRTUAL-ON","LEVEL 1","100","LEVEL 2","50"},newGameDefaultWinPoints,newGameDefaultLosePoints},
     {0x00010008,9,{"SEGA WORLD WIDE SOCCER 98","LEVEL 1","0","LEVEL 2","200"},newGameDefaultWinPoints,newGameDefaultLosePoints},
@@ -123,6 +123,10 @@ public:
                     return v.get<int>();
                 };
                 it->winPoints=award("win_points",it->winPoints,-1);it->losePoints=award("lose_points",0,0);validateRanking(*it);seen.push_back(id);
+                // Rename only exact historical placeholders, without writing
+                // the settings file or changing administrator-defined names.
+                if(id==0x00018002&&it->fields[0]=="ID 0x00018002")it->fields[0]="PUZZLE BOBBLE 3";
+                if(id==0x00010004&&it->fields[0]=="ID 0x00010004")it->fields[0]="SEGA RALLY CHAMPIONSHIP PLUS";
                 // Promote only the legacy unverified DecAthlete placeholder.
                 // Keep its slot/ID, user totals and explicitly enabled awards.
                 if(id==0x00010007&&it->fields[0]=="ID 0x00010007"){

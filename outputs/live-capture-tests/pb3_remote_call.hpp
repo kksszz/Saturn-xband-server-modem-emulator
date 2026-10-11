@@ -47,7 +47,7 @@ public:
     bool ringing(unsigned s)const override{return s==1&&cached==State::Ringing;}
     bool dial(unsigned s)override{
         if(s!=side||s!=0||cached!=State::Idle||pending.at("op")!="poll"||!bothJoined())return false;
-        pending={{"op","dial"},{"number","3336666665"}};return true;
+        pending={{"op","dial"},{"generation",token},{"target",xband::pairedPeerEndpoint(side)}};return true;
     }
     bool answer(unsigned s,uint64_t generation)override{
         if(s!=side||s!=1||generation!=token||!ringing(s)||pending.at("op")!="poll")return false;

@@ -36,6 +36,7 @@ int main()try{
     modem.configureVirtualCard(cardPath,true);
     std::ostringstream initial;modem.dumpFlash(initial);
     xband::ymir_adapter::FrontendModem::Config config;config.enabled=true;config.port=base;
+    config.phone="03-12345678"; // Any valid subscriber, not the historical fixed pair number.
     const auto pump=[&](auto done,std::source_location where=std::source_location::current()){const auto until=GetTickCount64()+5000;while(GetTickCount64()<until){
         check(service.step(GetTickCount64())&&control.step(GetTickCount64()));modem.pump();
         check(modem.snapshot().enabled);if(done())return;Sleep(1);}

@@ -81,6 +81,8 @@ int main(){
  r=xband_command_create(nullptr,nullptr);
  check(!xband_command_configure_service(r,0,"0355555555"));
  check(!xband_command_configure_service(r,host.port(),"BAD"));
+  check(!xband_command_configure_service(r,host.port(),"123456789012345678901"));
+  check(xband_command_configure_service(r,host.port(),"12345678901234567890"));
  check(xband_command_configure_service(r,host.port(),"0355555555"));
  // ROM can initialize and dial within one guest frame, before any host poll.
  for(const char* command:{"AT\r","ATH0\r","ATZ\r","AT &D0&Q6&S1E0V1&C1W2L3M1S7=30S8=1\r"}){
@@ -181,7 +183,7 @@ int main(){
  }
  // Route assignment is a fixture input, not evidence of full service matching.
  pair->roles->caller=0;
- feed(peers[0],"ATS91=15S92=15DT3336666665\r");
+ feed(peers[0],"ATS91=15S92=15DT0312345679\r");
  std::string ringing;
  pumpPeers([&]{ringing+=drain(peers[1]);return ringing.find("RING")!=std::string::npos;});
  check(!xband_command_peer(peers[0]));check(!xband_command_peer(peers[1]));
