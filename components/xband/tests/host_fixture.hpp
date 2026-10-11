@@ -9,8 +9,8 @@ ServerConfig configuration() {
 }
 struct Client {
     Socket socket; FrameQueue outgoing; MessageInbox incoming; std::vector<Json> messages;
-    uint64_t next = 1; std::string token_value;
-    explicit Client(uint16_t port) {
+    uint64_t next = 1; std::string token_value, endpoint_name;
+    explicit Client(uint16_t port, std::string endpoint = "test") : endpoint_name(std::move(endpoint)) {
         socket.value = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP); check(socket.value != INVALID_SOCKET, "client socket"); nonblocking(socket.value);
         sockaddr_in address{}; address.sin_family = AF_INET; address.sin_addr.s_addr = htonl(INADDR_LOOPBACK); address.sin_port = htons(port);
         const int connected = connect(socket.value, reinterpret_cast<sockaddr *>(&address), sizeof(address));
@@ -19,7 +19,7 @@ struct Client {
         check(getsockopt(socket.value, SOL_SOCKET, SO_ERROR, reinterpret_cast<char *>(&error), &size) == 0 && error == 0, "connect result");
     }
     void request(std::string type, Json body, Json reply = nullptr) {
-        auto text = Json{{"v", 2}, {"type", type}, {"endpoint", "test"}, {"session", token_value}, {"id", std::to_string(next++)},
+        auto text = Json{{"v", 2}, {"type", type}, {"endpoint", endpoint_name}, {"session", token_value}, {"id", std::to_string(next++)},
             {"reply_to", reply}, {"body", body}}.dump();
         check(outgoing.enqueue(std::span(reinterpret_cast<const uint8_t *>(text.data()), text.size())) == FrameQueue::Result::ok, "request");
     }

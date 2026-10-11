@@ -48,6 +48,22 @@ int main(){try{
     const auto empty=profiles.resolveBatch("modem-1","save-B",std::span<const uint8_t>{});
     check(empty&&empty->empty());
     Profiles noCapacity(0);check(noCapacity.observe("m","e",0,zero)==O::capacity_refused);
+    Profiles aliases;
+    const std::array<Profiles::SnapshotEntry,1> legacy{{{{"pb3-1","save-A",0},zero,false}}};
+    aliases.restoreEntries(legacy);
+    check(aliases.resolve("service-1","save-A",0)==zero);
+    check(aliases.observe("service-1","save-A",0,zero)==O::repeated&&aliases.size()==1);
+    check(aliases.snapshotEntries()[0].target.endpoint=="pb3-1"); // Preserve legacy stored spelling.
+    check(aliases.uniqueTarget("save-A",zero)==Profiles::Target{"service-1","save-A",0});
+    check(!aliases.resolve("service-0","save-A",0)&&!aliases.resolve("service-1","save-B",0));
+    auto duplicate=aliases.snapshotEntries();duplicate.push_back({{"service-1","save-A",0},zero,false});
+    invalid([&]{aliases.restoreEntries(duplicate);});check(aliases.size()==1);
+    aliases.invalidateEndpoint("service-1");check(aliases.size()==0);
+    check(aliases.observe("service-0","save-A",0,zero)==O::added);
+    check(aliases.observe("pb3-0","save-A",0,other)==O::conflict);
+    check(!aliases.resolve("service-0","save-A",0));
+    check(xband::canonicalServiceEndpoint("pb3-2")=="pb3-2"&&xband::canonicalServiceEndpoint("peer-0")=="peer-0");
+    invalid([&]{(void)xband::serviceEndpoint(2);});
     std::cout<<"PASS profile-name association: endpoint/epoch/player isolation, all-or-none order, unknown/conflict refusal, bounds, invalidation; synthetic fixtures, no authentication or live mail admission\n";
     return 0;
 }catch(const std::exception &e){std::cerr<<"FAIL "<<e.what()<<'\n';return 1;}}

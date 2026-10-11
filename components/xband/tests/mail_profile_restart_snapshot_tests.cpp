@@ -66,6 +66,9 @@ int main(int argc,char **argv){try{
     xband::MailProfileOffers restoredOffers;
     xband::decodeMailProfileRestartSnapshot(saved,"trial-token",custody,restoredNames,restoredOffers);
     check(restoredNames.resolve("pb3-1","fresh-COW-server-run",0)==std::optional<xband::MailProfileNames::Name>({'R'}));
+    check(restoredNames.resolve("service-1","fresh-COW-server-run",0)==std::optional<xband::MailProfileNames::Name>({'R'}));
+    check(restoredOffers.rememberedHeldFor({"service-1","fresh-COW-server-run",0},std::vector<uint64_t>{})==id);
+    check(xband::encodeMailProfileRestartSnapshot("trial-token",custody,restoredNames,restoredOffers)==saved);
     check(restoredOffers.rememberedHeldFor(target,std::vector<uint64_t>{})==id);
     check(restoredOffers.heldFor({"pb3-0","fresh-COW-server-run",0},id).empty());
     auto rejected=[&](const auto &bytes,const std::string &token,const auto &store){

@@ -23,7 +23,7 @@ int main()try{
     using Host=xband::windows::TcpHost;
     const uint16_t base=58460;
     auto pair=std::make_shared<PB3PairControl>();pair->standbyEnabled=true;
-    Host service({"127.0.0.1",base,false,{{"pb3-0",std::string(64,'a')}}},xband::FrameClock(1,1),
+    Host service({"127.0.0.1",base,false,{{"service-0",std::string(64,'a')}}},xband::FrameClock(1,1),
         [](uint64_t){return std::make_unique<Idle>();});
     Host control({"127.0.0.1",uint16_t(base+4),false,{{"call-0",std::string(64,'a')}}},xband::FrameClock(1,1),
         [pair](uint64_t){return std::make_unique<PB3PairControlEndpoint>(pair,0);});

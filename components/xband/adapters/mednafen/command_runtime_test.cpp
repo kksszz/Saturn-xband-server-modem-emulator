@@ -76,7 +76,7 @@ int main(){
  xband_command_reset(nullptr);xband_command_feed(nullptr,0);xband_command_destroy(nullptr);
  // Isolated ephemeral loopback server; no production server/card/mail files.
  using Host=xband::windows::TcpHost;
- Host host({"127.0.0.1",58280,false,{{"pb3-0",std::string(64,'a')}}},xband::FrameClock(1,60),
+ Host host({"127.0.0.1",58280,false,{{"service-0",std::string(64,'a')}}},xband::FrameClock(1,60),
    [](uint64_t){return std::make_unique<Echo>();},Host::PortMode::loopback_ephemeral_test);
  r=xband_command_create(nullptr,nullptr);
  check(!xband_command_configure_service(r,0,"0355555555"));
@@ -108,7 +108,7 @@ int main(){
  // Separate control data must never leak into guest UART. Service open is
  // admitted only after control join; observer emits one ready/cancel per wait.
  joined=false;
- Host gatedHost({"127.0.0.1",58280,false,{{"pb3-0",std::string(64,'a')}}},xband::FrameClock(1,1),
+ Host gatedHost({"127.0.0.1",58280,false,{{"service-0",std::string(64,'a')}}},xband::FrameClock(1,1),
    [](uint64_t){return std::make_unique<GatedEcho>();},Host::PortMode::loopback_ephemeral_test);
  Host controlHost({"127.0.0.1",58284,false,{{"call-0",std::string(64,'a')}}},xband::FrameClock(1,1),
    [](uint64_t){return std::make_unique<Control>();},Host::PortMode::loopback_ephemeral_test);
@@ -143,9 +143,9 @@ int main(){
    [pair](uint64_t){return std::make_unique<PB3PairControlEndpoint>(pair,0);},Host::PortMode::loopback_ephemeral_test);
  Host peerControl1({"127.0.0.1",58285,false,{{"call-1",std::string(64,'a')}}},xband::FrameClock(1,1),
    [pair](uint64_t){return std::make_unique<PB3PairControlEndpoint>(pair,1);},Host::PortMode::loopback_ephemeral_test);
- Host peerService0({"127.0.0.1",58280,false,{{"pb3-0",std::string(64,'a')}}},xband::FrameClock(1,1),
+ Host peerService0({"127.0.0.1",58280,false,{{"service-0",std::string(64,'a')}}},xband::FrameClock(1,1),
    [](uint64_t){return std::make_unique<Echo>();},Host::PortMode::loopback_ephemeral_test);
- Host peerService1({"127.0.0.1",58281,false,{{"pb3-1",std::string(64,'a')}}},xband::FrameClock(1,1),
+ Host peerService1({"127.0.0.1",58281,false,{{"service-1",std::string(64,'a')}}},xband::FrameClock(1,1),
    [](uint64_t){return std::make_unique<Echo>();},Host::PortMode::loopback_ephemeral_test);
  std::array<XbandCommandRuntime*,2> peers{xband_command_create(peerLog,nullptr),xband_command_create(nullptr,nullptr)};
  check(xband_command_configure_side(peers[0],0));check(xband_command_configure_side(peers[1],1));

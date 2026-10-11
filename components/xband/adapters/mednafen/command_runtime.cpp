@@ -1,6 +1,7 @@
 #include "command_runtime.h"
 #include "card_runtime.h"
 #include <xband/windows_modem_service.hpp>
+#include <xband/service_identity.hpp>
 #include <xband/modem_service_buffer.hpp>
 #include <xband/modem_command_session.hpp>
 #include <xband/local_phone_policy.hpp>
@@ -292,7 +293,7 @@ struct XbandCommandRuntime {
         if(!service){
             ticket=session->ticket();
             service=std::make_unique<xband::windows::ModemServiceClient>(
-                xband::windows::ClientConfig{"127.0.0.1",port,false,"pb3-"+std::to_string(side),std::string(64,'a'),60},now);
+                xband::windows::ClientConfig{"127.0.0.1",port,false,xband::serviceEndpoint(side),std::string(64,'a'),60},now);
         }
         if(!service->step(now)){
             if(log)log(service->failureName());

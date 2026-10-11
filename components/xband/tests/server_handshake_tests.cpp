@@ -68,6 +68,45 @@ int main(int argc, char **argv) {
             check(replacement->handshake.state() == ServerHandshake::State::accepted, "disconnect releases identity");
             auto independent = std::make_unique<Peer>(registry); auto m = hello(); m["endpoint"] = "modem2"; independent->feed(m); independent->finish();
             check(independent->handshake.state() == ServerHandshake::State::accepted, "second configured identity independent");
+        } else if (name == "handshake_aliases") {
+            EndpointRegistry aliases({{"service-0", key, {"pb3-0"}}, {"service-1", key, {"pb3-1"}}});
+            auto legacy = std::make_unique<Peer>(aliases);
+            auto oldHello = hello(); oldHello["endpoint"] = "pb3-0";
+            legacy->feed(oldHello);
+            auto currentHello = hello(); currentHello["endpoint"] = "service-0";
+            auto duplicate = std::make_unique<Peer>(aliases); duplicate->feed(currentHello);
+            check(duplicate->handshake.failure() == ServerHandshake::Failure::busy, "alias shares pending reservation");
+            duplicate.reset();
+            check(legacy->finish()["endpoint"] == "pb3-0", "legacy wire spelling echoed");
+            check(aliases.canonicalName(legacy->handshake.name()) == "service-0", "canonical display identity");
+            auto independent = std::make_unique<Peer>(aliases);
+            auto secondHello = hello(); secondHello["endpoint"] = "service-1";
+            independent->feed(secondHello); independent->finish();
+            check(independent->handshake.state() == ServerHandshake::State::accepted, "other side remains independent");
+            legacy.reset();
+            auto current = std::make_unique<Peer>(aliases); current->feed(currentHello);
+            check(current->finish()["endpoint"] == "service-0", "canonical identity accepts after legacy disconnect");
+            auto oldDuplicate = std::make_unique<Peer>(aliases); oldDuplicate->feed(oldHello);
+            check(oldDuplicate->handshake.failure() == ServerHandshake::Failure::busy, "canonical also reserves alias");
+            current.reset();
+            for (const auto endpointName : {"pb3-0", "service-0", "pb3-2", "service-2"}) {
+                auto denied = std::make_unique<Peer>(aliases); auto message = hello();
+                message["endpoint"] = endpointName; message["body"]["auth_key"] = std::string(64, 'b');
+                denied->feed(message);
+                check(denied->handshake.failure() == ServerHandshake::Failure::denied, "aliases never bypass configured key");
+            }
+            const auto invalid = [&](std::vector<EndpointRegistry::Identity> identities) {
+                bool rejected = false;
+                try { EndpointRegistry bad(std::move(identities)); } catch (const std::invalid_argument &) { rejected = true; }
+                check(rejected, "colliding or malformed alias configuration rejected");
+            };
+            invalid({{"service-0", key, {"service-0"}}});
+            invalid({{"service-0", key, {"pb3-0", "pb3-0"}}});
+            invalid({{"service-0", key, {"pb3-0"}}, {"pb3-0", key}});
+            invalid({{"pb3-0", key}, {"service-0", key, {"pb3-0"}}});
+            invalid({{"service-0", key, {"shared"}}, {"service-1", key, {"shared"}}});
+            invalid({{"service-0", key, {""}}});
+            invalid({{"service-0", key, std::vector<std::string>(33, "alias")}});
         } else if (name == "handshake_timeout") {
             peer->feed(hello(), 4999);
             check(!peer->handshake.sent(1, 5000) && peer->handshake.output().empty(), "reply drain cannot extend handshake deadline");

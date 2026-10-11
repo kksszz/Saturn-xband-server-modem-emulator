@@ -893,7 +893,7 @@ public:
         if(profileMailbox){prepareProfileMailbox();return;}
         if(!mailRoutes||incomingExamined)return;
         incomingExamined=true;
-        const auto endpoint="pb3-"+std::to_string(side);
+        const auto endpoint=xband::serviceEndpoint(side);
         const auto begin=xband::registrationOffset(p.tcp.captured,81);
         std::vector<uint8_t> name;
         for(size_t i=begin;i<begin+32&&p.tcp.captured[i];++i)name.push_back(p.tcp.captured[i]);
@@ -926,7 +926,7 @@ public:
         if(profileRunValid&&!*profileRunValid)return;
         const auto player=p.tcp.captured[xband::registrationOffset(p.tcp.captured,43)];
         if(player!=0&&player!=3)return;
-        const xband::MailProfileNames::Target current{"pb3-"+std::to_string(side),"fresh-COW-server-run",player};
+        const xband::MailProfileNames::Target current{xband::serviceEndpoint(side),"fresh-COW-server-run",player};
         std::vector<uint64_t> held;
         if(profileOffers){
             const auto words=diagnostic::reportedInventory(p.tcp.captured,true);
@@ -976,7 +976,7 @@ public:
         }
         try{
             const auto records=diagnostic::decodeObservedOutgoingRequest(p.tcp.captured,bool(profileNames));
-            const auto endpoint="pb3-"+std::to_string(side);
+            const auto endpoint=xband::serviceEndpoint(side);
             const auto nameBegin=xband::registrationOffset(p.tcp.captured,81);
             std::vector<uint8_t> currentName;
             for(size_t i=nameBegin;i<nameBegin+32&&p.tcp.captured[i];++i)currentName.push_back(p.tcp.captured[i]);
@@ -1417,13 +1417,14 @@ int main(){try{
     > hosts;
     std::array<std::shared_ptr<PB3Observation>,2> observations{std::make_shared<PB3Observation>(),std::make_shared<PB3Observation>()};
     for(unsigned i=0;i<2;++i)hosts[i]=std::make_unique<Host>(xband::protocol::ServerConfig{
-        "127.0.0.1",static_cast<uint16_t>(basePort+i),false,{{"pb3-"+std::to_string(i),std::string(64,'a')}}},
+        "127.0.0.1",static_cast<uint16_t>(basePort+i),false,
+        {{xband::serviceEndpoint(i),std::string(64,'a'),{xband::legacyServiceEndpoint(i)}}}},
         xband::FrameClock(1,1),[i,o=observations[i],roles,dummyMail,mailCaptures,mailRoutes,clearAccepted,inventory,commit,profileNames,profileMailbox,profileRunValid,profileOffers,profileBatchClear,profileSubmissionClear,rememberHeld,commitProfileState,postMatchExperiment,localMailJournal
 #ifdef PB3_PAIR_CONTROL
         ,pair
 #endif
         ,activity,cardDebitTrials,reviewedResetReservation,serviceCreditSettings,serviceCreditLedger,liveMatchCredits,communicationLog](uint64_t hz)->std::unique_ptr<xband::ServiceEndpoint>{
-            if(hz!=60)throw std::runtime_error("PB3 frame clock mismatch");
+            if(hz!=60)throw std::runtime_error("XBAND service frame clock mismatch");
             const char *probe=std::getenv("XBAND_MAIL_PROBE");
             std::function<bool()> postMatch;
             std::function<void()> markPostMatch;
@@ -1551,7 +1552,7 @@ int main(){try{
         if(profileNames)for(unsigned i=0;i<2;++i){
             const bool connected=hosts[i]->clientCount()!=0;
             if(hadProfileTransport[i]&&!connected){
-                profileNames->invalidateEndpoint("pb3-"+std::to_string(i));
+                profileNames->invalidateEndpoint(xband::serviceEndpoint(i));
                 *profileRunValid=false; // Stored mail must never migrate to a replacement COW profile.
                 if(profileOffers)profileOffers->invalidateAll();
                 std::cout<<"XBAND_MAIL_PROFILE_INVALIDATED side="<<i<<" reason=transport_disconnected\n"<<std::flush;

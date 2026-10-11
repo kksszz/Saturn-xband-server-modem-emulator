@@ -8,13 +8,21 @@ namespace xband::protocol {
 // Plaintext key comparison is a configured-peer check, NOT secure authentication.
 class EndpointRegistry {
 public:
-    struct Identity { std::string name, key; };
+    struct Identity { std::string name, key; std::vector<std::string> aliases{}; };
     enum class Result { acquired, denied, busy };
     explicit EndpointRegistry(std::vector<Identity> identities) {
         if (identities.empty() || identities.size() > 32) throw std::invalid_argument("Identity count");
         for (auto &identity : identities) {
             if (!endpoint(identity.name) || !keyValid(identity.key)) throw std::invalid_argument("Invalid identity configuration");
-            for (const auto &slot : slots_) if (slot.identity.name == identity.name) throw std::invalid_argument("Duplicate identity");
+            if (identity.aliases.size() > 32) throw std::invalid_argument("Alias count");
+            std::vector<std::string_view> names{identity.name};
+            for (const auto &alias : identity.aliases) {
+                if (!endpoint(alias)) throw std::invalid_argument("Invalid identity alias");
+                for (const auto name : names) if (name == alias) throw std::invalid_argument("Duplicate identity alias");
+                names.push_back(alias);
+            }
+            for (const auto name : names)
+                for (const auto &slot : slots_) if (matches(slot.identity, name)) throw std::invalid_argument("Duplicate identity");
             slots_.push_back({std::move(identity), nullptr});
         }
     }
@@ -22,7 +30,7 @@ public:
     EndpointRegistry &operator=(const EndpointRegistry &) = delete;
     Result acquire(std::string_view name, std::string_view key, const void *owner) noexcept {
         if (!owner) return Result::denied;
-        for (auto &slot : slots_) if (slot.identity.name == name) {
+        for (auto &slot : slots_) if (matches(slot.identity, name)) {
             if (slot.identity.key != key) return Result::denied;
             if (slot.owner) return Result::busy;
             slot.owner = owner; return Result::acquired;
@@ -32,7 +40,17 @@ public:
     void release(const void *owner) noexcept {
         for (auto &slot : slots_) if (slot.owner == owner) slot.owner = nullptr;
     }
+    // For display/ownership only. The wire must still echo the client's name.
+    std::string_view canonicalName(std::string_view name) const noexcept {
+        for (const auto &slot : slots_) if (matches(slot.identity, name)) return slot.identity.name;
+        return name;
+    }
 private:
+    static bool matches(const Identity &identity, std::string_view name) noexcept {
+        if (identity.name == name) return true;
+        for (const auto &alias : identity.aliases) if (alias == name) return true;
+        return false;
+    }
     static bool keyValid(std::string_view key) noexcept {
         if (key.size() != 64) return false;
         for (const char c : key) if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return false;

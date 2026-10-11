@@ -1,4 +1,5 @@
 #pragma once
+#include "service_identity.hpp"
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
@@ -22,13 +23,20 @@ public:
     struct Target {
         std::string endpoint,epoch;
         uint8_t player;
-        bool operator==(const Target&)const=default;
+        bool operator==(const Target &other)const noexcept {
+            return canonicalServiceEndpoint(endpoint)==canonicalServiceEndpoint(other.endpoint)&&
+                epoch==other.epoch&&player==other.player;
+        }
     };
 private:
     using Key=std::tuple<std::string,std::string,uint8_t>;
     struct Entry { Name name; bool conflicted=false; };
     std::map<Key,Entry> entries_;
     size_t limit_;
+    static bool sameKey(const Key &key,const std::string &endpoint,const std::string &epoch,uint8_t player){
+        return canonicalServiceEndpoint(std::get<0>(key))==canonicalServiceEndpoint(endpoint)&&
+            std::get<1>(key)==epoch&&std::get<2>(key)==player;
+    }
     static void validate(const std::string &endpoint,const std::string &epoch,uint8_t player){
         if(endpoint.empty()||endpoint.size()>64||endpoint.find('\0')!=std::string::npos||
            epoch.empty()||epoch.size()>64||epoch.find('\0')!=std::string::npos||player>3)
@@ -60,7 +68,11 @@ public:
         if(name.empty()||name.size()>32||std::find(name.begin(),name.end(),0)!=name.end())
             throw std::invalid_argument("Invalid observed profile name");
         const Key key{endpoint,epoch,player};
-        const auto found=entries_.find(key);
+        // Retain the stored spelling, so old restart snapshots re-encode
+        // exactly. Alias matching never changes custody IDs or source bytes.
+        const auto found=std::find_if(entries_.begin(),entries_.end(),[&](const auto &item){
+            return sameKey(item.first,endpoint,epoch,player);
+        });
         if(found!=entries_.end()){
             auto &entry=found->second;
             if(entry.conflicted)return Observation::conflict;
@@ -76,7 +88,9 @@ public:
     }
     std::optional<Name> resolve(const std::string &endpoint,const std::string &epoch,uint8_t player)const{
         validate(endpoint,epoch,player);
-        const auto found=entries_.find(Key{endpoint,epoch,player});
+        const auto found=std::find_if(entries_.begin(),entries_.end(),[&](const auto &item){
+            return sameKey(item.first,endpoint,epoch,player);
+        });
         if(found==entries_.end()||found->second.conflicted)return {};
         return found->second.name;
     }
@@ -97,7 +111,7 @@ public:
     void invalidateEndpoint(const std::string &endpoint){
         validate(endpoint,"invalidate",0);
         for(auto i=entries_.begin();i!=entries_.end();){
-            if(std::get<0>(i->first)==endpoint)i=entries_.erase(i);else ++i;
+            if(canonicalServiceEndpoint(std::get<0>(i->first))==canonicalServiceEndpoint(endpoint))i=entries_.erase(i);else ++i;
         }
     }
     // Unique within the observed epoch only; not global account discovery.

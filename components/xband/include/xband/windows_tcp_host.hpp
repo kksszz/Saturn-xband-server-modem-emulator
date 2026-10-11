@@ -129,7 +129,7 @@ public:
         for (const auto &client : clients_) if (!client->session.active()) ++pending;
         for (const auto &name : endpoint_names_) {
             Json row{{"endpoint", name}, {"connected", false}, {"call_active", false}, {"peer_snapshot", nullptr}};
-            for (const auto &client : clients_) if (client->session.endpointName() == name) {
+            for (const auto &client : clients_) if (registry_.canonicalName(client->session.endpointName()) == name) {
                 row["connected"] = true;
                 row["call_active"] = !client->session.call().empty();
                 if (const auto *snapshot = client->session.snapshot()) row["peer_snapshot"] = *snapshot;

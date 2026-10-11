@@ -43,7 +43,7 @@ public:
     Timing timing()const{return timing_;}
     explicit PB3RemoteService(unsigned index,unsigned channel=0):side(index){
         if(side>1||channel>2)throw std::invalid_argument("PB3 endpoint selection");
-        const std::array<const char*,3> names{"pb3-","peer-","call-"};
+        const std::array<const char*,3> names{"service-","peer-","call-"};
         client=std::make_unique<Service>(xband::windows::ClientConfig{
             "127.0.0.1",static_cast<uint16_t>(58240+channel*2+side),false,names[channel]+std::to_string(side),std::string(64,'a'),60},now());
         connections.push_back(client.get());

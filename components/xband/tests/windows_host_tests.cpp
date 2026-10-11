@@ -4,6 +4,7 @@ int main(int argc, char **argv) {
     try {
         if (argc != 2) return 2;
         const std::string_view name = argv[1]; Counts counts; auto config = configuration();
+        if (name == "host_service_alias") config.identities = {{"service-0", std::string(64, 'a'), {"pb3-0"}}};
         auto factory = [&](uint64_t hz) -> std::unique_ptr<ServiceEndpoint> { check(hz == 1000, "guest clock"); return std::make_unique<Echo>(counts); };
         auto host = std::make_unique<Host>(config, FrameClock(1, 1000), factory, Host::PortMode::loopback_ephemeral_test);
         uint64_t time = 0;
@@ -104,6 +105,29 @@ int main(int argc, char **argv) {
             check(host->clientCount() == 0 && host->status()["endpoints"][0]["connected"] == false, "disconnect returns configured row offline");
             check(saved["endpoints"][0]["peer_snapshot"] == body, "owned copy survives peer destruction");
             host->stop(); check(host->status()["running"] == false, "stop reported");
+        } else if (name == "host_service_alias") {
+            for (const auto endpointName : {"pb3-0", "service-0"}) {
+                Client client(host->port(), endpointName);
+                client.request("hello", {{"client", "test"}, {"clock_hz", 1000}, {"auth_key", std::string(64, 'a')}});
+                client.exchange(*host, time, 1);
+                check(client.messages[0]["endpoint"] == endpointName, "wire hello name retained");
+                client.request("open", {{"target", "local-service"}, {"subscriber", "0001"}});
+                client.exchange(*host, time, 2);
+                const auto call = client.messages.back()["body"]["call"].get<std::string>();
+                client.request("data", {{"call", call}, {"offset", "0"}, {"bytes", 3}, {"payload_b64", "QUJD"}});
+                client.exchange(*host, time, 3);
+                client.request("advance", {{"call", call}, {"tick", "1000"}});
+                client.exchange(*host, time, 6);
+                check(client.messages[3]["endpoint"] == endpointName && client.messages[3]["body"]["payload_b64"] == "QUJD", "alias transports exact payload");
+                const auto status = host->status();
+                check(status["endpoints"].size() == 1 && status["endpoints"][0]["endpoint"] == "service-0" &&
+                    status["endpoints"][0]["connected"] == true && status["endpoints"][0]["call_active"] == true,
+                    "one canonical active monitor row for either spelling");
+                check(shutdown(client.socket.value, SD_SEND) == 0, "alias EOF");
+                for (unsigned i = 0; i < 1000 && host->clientCount(); ++i) { check(host->step(++time), "alias EOF pump"); Sleep(1); }
+                check(host->clientCount() == 0 && host->status()["endpoints"][0]["connected"] == false, "alias disconnect releases row");
+            }
+            check(counts.input == 6 && counts.destroyed == 2, "two sequential spellings use two disposed services");
         } else if (name == "host_liveness") {
             auto client = std::make_unique<Client>(host->port());
             client->request("hello", {{"client", "test"}, {"clock_hz", 1000}, {"auth_key", std::string(64, 'a')}}); client->exchange(*host, time, 1);

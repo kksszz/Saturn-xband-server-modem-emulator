@@ -1,3 +1,9 @@
+# Unreleased — service endpoint naming
+
+2026-10-11。サービス接続の識別子を`service-0`／`service-1`へ整理し、サーバーとYMIR／Mednafen両アダプターを更新。旧`pb3-0`／`pb3-1`はサーバー側の互換別名として維持し、二重接続を防止します。通信モニターは新名で表示し、保存済みメールのID・本文・旧表記を保持します。対戦・管理endpoint、ポート、通信形式は変更しません。新アダプターは新サーバーと組み合わせてください。公開済みv0.5.0のタグ・配布物は変更しません。
+
+サーバー／共通通信147件、YMIR統合21件、Mednafenアダプター3件の自動試験が成功しました。[名称整理の検証記録](docs/SERVICE-ENDPOINT-RENAME-VERIFICATION.md)を参照してください。
+
 # v0.5.0 Public prerelease — YMIR / Mednafen integration
 
 2026-10-11。最新XBANDサーバー／モデム、シリアル対戦、YMIR／Mednafen組み込みソース・差分、仕様書・各組み込みガイドを1つのWindows x64パッケージへ収録。サーバーソース・CMake・回帰試験、収録案内、ハッシュ／必須ファイル／除外対象を検査するスクリプトも追加しました。エミュレーター本体・EXE、BIOS・ゲーム、個人データは配布しません。

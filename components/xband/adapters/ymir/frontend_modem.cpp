@@ -1,5 +1,6 @@
 #include "frontend_modem.hpp"
 #include <xband/windows_modem_service.hpp>
+#include <xband/service_identity.hpp>
 #include <xband/modem_command_session.hpp>
 #include <xband/modem_service_buffer.hpp>
 #include <xband/peer_uart_timing.hpp>
@@ -174,7 +175,7 @@ struct FrontendModem::Impl {
     void publish(){std::lock_guard lock(mutex);published={enabled,peer||(session&&session->carrier()),frame,sent,received,status,bool(cardStorage),card.present,telephoneLineConnected,cardStorage&&!cardSaveFailed?card.remainingUnits():std::nullopt,cardSaveFailed,card.readFault};}
     std::unique_ptr<Client> serviceConnection(uint64_t now){
         return std::make_unique<Client>(windows::ClientConfig{
-            config.address,uint16_t(config.port+config.side),config.allowLAN,"pb3-"+std::to_string(config.side),std::string(64,'a'),60},now);
+            config.address,uint16_t(config.port+config.side),config.allowLAN,serviceEndpoint(config.side),std::string(64,'a'),60},now);
     }
     void dropTelephoneCall(){
         service.reset();buffer.reset();serviceBatch=closeService=false;
@@ -254,7 +255,7 @@ struct FrontendModem::Impl {
         const auto now=GetTickCount64();
         auto connection=[&](unsigned offset,std::string name){return std::make_unique<Client>(windows::ClientConfig{
             config.address,uint16_t(config.port+offset+config.side),config.allowLAN,name+std::to_string(config.side),std::string(64,'a'),60},now);};
-        service=connection(0,"pb3-");control=connection(4,"call-");
+        service=serviceConnection(now);control=connection(4,"call-");
         ModemCommandSession::Hooks hooks;
         if(trace)hooks.observedCommand=[this](std::string_view){++commands;};
         hooks.reply=[this](std::string_view s){return reply(s);};

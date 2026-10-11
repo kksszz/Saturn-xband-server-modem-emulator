@@ -1,5 +1,6 @@
 #include <xband/mail_profile_mailbox.hpp>
 #include <xband/mail_profile_offers.hpp>
+#include <xband/mail_account_routes.hpp>
 #include <iostream>
 
 int main(){try{
@@ -71,6 +72,24 @@ int main(){try{
     names.observe("m1","epoch",1,B{'X'}); // Conflicted epoch must fail closed globally.
     check(xband::selectProfileMailbox(store,names,{"m2","epoch",0}).prepared.empty());
     check(store.captures().size()==5); // No delivery/delete/deduplication.
-    std::cout<<"PASS portable profile mailboxes: current player/endpoint/epoch, held-ID filter before limit, duplicate/foreign/unknown IDs, unknown/ambiguous/conflicted refusal, no dequeue\n";
+    xband::MailProfileNames legacyNames;
+    legacyNames.observe("pb3-1","legacy-epoch",0,B{'R'});
+    xband::MailProfileOffers legacyOffers;
+    check(legacyOffers.offerBatch({"pb3-1","legacy-epoch",0},std::vector<uint64_t>{1}));
+    check(legacyOffers.rememberedHeldFor({"service-1","legacy-epoch",0},std::vector<uint64_t>{1})==std::vector<uint64_t>{1});
+    check(legacyOffers.heldFor({"service-0","legacy-epoch",0},std::vector<uint64_t>{1}).empty());
+    xband::MailCaptureStore legacyStore;
+    xband::MailCapture legacyMail{};legacyMail.sourceEndpoint="pb3-0";
+    legacyMail.sourcePhone="123";legacyMail.sourceCodename={'S'};
+    legacyMail.fields={B{'R',0},B{'T',0},B{0,7}};
+    check(legacyStore.retain(legacyMail)==1);
+    const auto selected=xband::selectProfileMailbox(legacyStore,legacyNames,{"service-1","legacy-epoch",0});
+    check(selected.prepared.size()==1&&selected.prepared[0]->localId==1&&selected.prepared[0]->sourceEndpoint=="pb3-0");
+    xband::MailAccountRoutes legacyRoutes;
+    legacyRoutes.observe("pb3-1",B{'R'});legacyRoutes.observe("service-1",B{'R'});
+    check(legacyRoutes.pendingFor(legacyStore,"service-1").size()==1);
+    check(legacyRoutes.pendingFor(legacyStore,"pb3-1").size()==1);
+    check(legacyRoutes.pendingFor(legacyStore,"service-0").empty());
+    std::cout<<"PASS portable profile mailboxes: current player/endpoint/epoch, held-ID filter before limit, duplicate/foreign/unknown IDs, unknown/ambiguous/conflicted refusal, legacy service aliases, no dequeue\n";
     return 0;
 }catch(const std::exception &e){std::cerr<<"FAIL "<<e.what()<<'\n';return 1;}}
