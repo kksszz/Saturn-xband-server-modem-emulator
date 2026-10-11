@@ -15,6 +15,7 @@
 *.ssz
 *.bmp
 *.png
+!docs/images/vf-remix-xband-mednafen.png
 *.jpg
 mail-journal/
 activity-history/
