@@ -1,5 +1,9 @@
 # Third-party notices
 
+- `components/link-cable` extracts this project's GPL-3.0-only YMIR-side link transport and SCI behavior into host-independent code. The original YMIR integration is retained unchanged. `integration/mednafen/mednafen-1.32.1-link-cable.patch` contains additive integration changes and limited Mednafen GPL-2.0-or-later context; the combined build follows GPLv3 and retains upstream notices. It does not include the emulator executable or game media.
+
+- `integration/mednafen/mednafen-1.32.1-xband.patch` contains this project's integration changes and limited upstream context from Mednafen 1.32.1. Mednafen copyright notices (Mednafen Team; GNU GPL version 2 or later) remain in the patch/source. This project's components are GPL-3.0-only; the combined build is distributed under GPLv3 with all respective notices retained. Complete Mednafen source/executable, BIOS and game media are not included. Obtain the matching upstream archive specified in the integration README. MSYS2, SDL2, zlib and libiconv are external build/runtime dependencies with their own licenses.
+
 - nlohmann/json 3.12.0: Niels Lohmann and contributors, MIT license. CMake fetches the official release archive and verifies SHA-256. The full notice is in `docs/LICENSE-nlohmann-json.txt`. It is not a Ymir dependency.
 - `config/jp-area-codes.json`: current Japanese fixed-line regional-display mapping derived from the NTT East/West publications cited in the JSON. This is not a reconstruction of historical XBAND local-call boundaries or a subscriber list.
 - References to X-Band/SegaServer and SegaOS identify research sources only. Those repositories' source files are not copied into this release. XBAND icon images are not bundled.

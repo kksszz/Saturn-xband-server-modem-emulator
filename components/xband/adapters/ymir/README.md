@@ -25,8 +25,11 @@ The attachment destructor never accesses or restores a potentially dead bus.
 Required hooks are board mode, UART read and UART write. The register bank is
 borrowed. Optional hooks implement card-status overlay and diagnostic observation;
 none of those hooks may synchronously wait for a socket or a UI thread. The
-existing diagnostic card hook is still a diagnostic implementation, not the
-final nonblocking card-storage adapter.
+diagnostic hook alone is not a complete storage owner. The current normal
+application uses FrontendModem, shared VirtualMediaCard and Windows image
+storage for persistent finite cards and owner-thread management commands.
+See docs/EMULATOR-INTEGRATION-SPEC.md in the repository for current host
+differences; the diagnostic bus contract below does not describe all UI policy.
 
 Unowned reads/writes retain the underlying cartridge/CD behavior and bus waits.
 To match the proven game implementation, a normal read first samples the saved
@@ -41,7 +44,7 @@ transport, clear call state, remove the cartridge, or make reset/save-state
 operations safe. The owner must close/reset the session first. Re-enabling must
 not be used to resume an old live network session after a guest rewind.
 
-## Remaining normal-application work
+## Shared command and transport ownership contract
 
 `xband/modem_command_session.hpp` now provides observed AT/service state handling:
 line assembly, profile requests, pending dial, generation-checked CONNECT,

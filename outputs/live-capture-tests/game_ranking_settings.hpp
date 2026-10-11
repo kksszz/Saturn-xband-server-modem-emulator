@@ -73,14 +73,14 @@ inline constexpr int newGameDefaultWinPoints=1,newGameDefaultLosePoints=0;
 // Verified game IDs are application defaults, not private runtime data.
 // Keep this catalog in source control and releases; saved settings override it.
 inline std::vector<GameRankingRow> rankingDefaults(){return {
-    {0x00010003,1,{rankingUTF8(L"Virtua Fighter\u2122 Remix"),rankingUTF8(L"\u4e94\u6bb5"),"2156",rankingUTF8(L"\u516d\u6bb5"),"2844"}},
-    {0x00018003,2,{"PUYO PUYO SUN",rankingUTF8(L"17\u7d1a"),"13",rankingUTF8(L"16\u7d1a"),"7"}},
-    {0x00018002,3,{"ID 0x00018002","LEVEL 1","100","LEVEL 2","50"}},
+    {0x00010003,1,{rankingUTF8(L"Virtua Fighter\u2122 Remix"),rankingUTF8(L"\u4e94\u6bb5"),"2156",rankingUTF8(L"\u516d\u6bb5"),"2844"},newGameDefaultWinPoints,newGameDefaultLosePoints},
+    {0x00018003,2,{"PUYO PUYO SUN",rankingUTF8(L"17\u7d1a"),"13",rankingUTF8(L"16\u7d1a"),"7"},newGameDefaultWinPoints,newGameDefaultLosePoints},
+    {0x00018002,3,{"ID 0x00018002","LEVEL 1","100","LEVEL 2","50"},newGameDefaultWinPoints,newGameDefaultLosePoints},
     {0x00010007,4,{"DECATHLETE XBAND","LEVEL 1","0","LEVEL 2","200"},newGameDefaultWinPoints,newGameDefaultLosePoints},
     {0x00010006,5,{"DAYTONA USA CIRCUIT EDITION","LEVEL 1","0","LEVEL 2","200"},newGameDefaultWinPoints,newGameDefaultLosePoints},
-    {0x00010004,6,{"ID 0x00010004","LEVEL 1","100","LEVEL 2","50"}},
+    {0x00010004,6,{"ID 0x00010004","LEVEL 1","100","LEVEL 2","50"},newGameDefaultWinPoints,newGameDefaultLosePoints},
     {0x00018001,7,{"SATURN BOMBERMAN","LEVEL 1","0","LEVEL 2","200"},newGameDefaultWinPoints,newGameDefaultLosePoints},
-    {0x00010005,8,{"VIRTUAL-ON","LEVEL 1","100","LEVEL 2","50"}},
+    {0x00010005,8,{"VIRTUAL-ON","LEVEL 1","100","LEVEL 2","50"},newGameDefaultWinPoints,newGameDefaultLosePoints},
     {0x00010008,9,{"SEGA WORLD WIDE SOCCER 98","LEVEL 1","0","LEVEL 2","200"},newGameDefaultWinPoints,newGameDefaultLosePoints},
     {0x00018004,10,{"SHADOWS OF THE TUSK","LEVEL 1","0","LEVEL 2","200"},newGameDefaultWinPoints,newGameDefaultLosePoints}
 };}

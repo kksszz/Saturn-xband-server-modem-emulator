@@ -1,4 +1,5 @@
 #include <xband/windows_tcp_host.hpp>
+#include "communication_log.hpp"
 #include <xband/local_phone_policy.hpp>
 #include <xband/local_match_roles.hpp>
 #include <xband/standby_registration.hpp>
@@ -1395,6 +1396,17 @@ int main(){try{
         };
         if(!profileRestartProbe)commitProfileState();
     }
+    std::shared_ptr<diagnostic::CommunicationLog> communicationLog;
+    try{
+        const auto configured=_wgetenv(L"XBAND_COMMUNICATION_LOG_DIR");
+        communicationLog=std::make_shared<diagnostic::CommunicationLog>(configured?std::filesystem::path(configured):std::filesystem::current_path()/L"communication-logs");
+        std::cout<<"XBAND_COMMUNICATION_LOG "<<communicationLog->snapshot().directory.string()<<" private guest data; recording starts with this run\n"<<std::flush;
+    }catch(const std::exception& e){std::cerr<<"XBAND_COMMUNICATION_LOG_UNAVAILABLE "<<e.what()<<'\n';}
+#ifdef PB3_PAIR_CONTROL
+    if(communicationLog)pair->communicationByte=[communicationLog,p=pair.get()](unsigned side,bool receiving,uint8_t byte){
+        communicationLog->byte("Peer",side,receiving?"RX":"TX",byte,unsigned(p->elapsed[side]),p->generation);
+    };
+#endif
     using Host=xband::windows::TcpHost;
     std::array<std::unique_ptr<Host>,
 #ifdef PB3_PAIR_CONTROL
@@ -1410,7 +1422,7 @@ int main(){try{
 #ifdef PB3_PAIR_CONTROL
         ,pair
 #endif
-        ,activity,cardDebitTrials,reviewedResetReservation,serviceCreditSettings,serviceCreditLedger,liveMatchCredits](uint64_t hz)->std::unique_ptr<xband::ServiceEndpoint>{
+        ,activity,cardDebitTrials,reviewedResetReservation,serviceCreditSettings,serviceCreditLedger,liveMatchCredits,communicationLog](uint64_t hz)->std::unique_ptr<xband::ServiceEndpoint>{
             if(hz!=60)throw std::runtime_error("PB3 frame clock mismatch");
             const char *probe=std::getenv("XBAND_MAIL_PROBE");
             std::function<bool()> postMatch;
@@ -1449,15 +1461,16 @@ int main(){try{
             });
 #endif
 #endif
-            return endpoint;});
+            return diagnostic::logEndpoint(std::move(endpoint),communicationLog,"Service",i);});
     auto relay=std::make_shared<PB3RelayQueues>();
     for(unsigned i=0;i<2;++i)hosts[i+2]=std::make_unique<Host>(xband::protocol::ServerConfig{
         "127.0.0.1",static_cast<uint16_t>(basePort+2+i),false,{{"peer-"+std::to_string(i),std::string(64,'a')}}},
-        xband::FrameClock(1,1),[i,relay](uint64_t hz)->std::unique_ptr<xband::ServiceEndpoint>{
-            if(hz!=60)throw std::runtime_error("relay clock mismatch");return std::make_unique<PB3Relay>(relay,i);});
+        xband::FrameClock(1,1),[i,relay,communicationLog](uint64_t hz)->std::unique_ptr<xband::ServiceEndpoint>{
+            if(hz!=60)throw std::runtime_error("relay clock mismatch");return diagnostic::logEndpoint(std::make_unique<PB3Relay>(relay,i),communicationLog,"Peer",i);});
 #ifdef PB3_SERVER_WINDOW
 #ifdef XBAND_FRONTEND_SERVER
     XbandDashboard monitor;
+    monitor.setCommunicationLog(communicationLog);
     monitor.setServiceCreditSettings(serviceCreditSettings);
     monitor.setActivityHistory(activity);
     if(diagnostic::activeGameResults)monitor.setGameResultHistory(diagnostic::activeGameResults->history());
@@ -1478,8 +1491,8 @@ int main(){try{
 #ifdef PB3_PAIR_CONTROL
     for(unsigned i=0;i<2;++i)hosts[i+4]=std::make_unique<Host>(xband::protocol::ServerConfig{
         "127.0.0.1",static_cast<uint16_t>(basePort+4+i),false,{{"call-"+std::to_string(i),std::string(64,'a')}}},
-        xband::FrameClock(1,1),[i,pair](uint64_t hz)->std::unique_ptr<xband::ServiceEndpoint>{
-            if(hz!=60)throw std::runtime_error("pair control clock mismatch");return std::make_unique<PB3PairControlEndpoint>(pair,i);});
+        xband::FrameClock(1,1),[i,pair,communicationLog](uint64_t hz)->std::unique_ptr<xband::ServiceEndpoint>{
+            if(hz!=60)throw std::runtime_error("pair control clock mismatch");return diagnostic::logEndpoint(std::make_unique<PB3PairControlEndpoint>(pair,i),communicationLog,"Control",i);});
     std::cout<<"PB3_CALL_CONTROL_READY ports="<<basePort+4<<".."<<basePort+5<<" migration-only\n"<<std::flush;
 #endif
     std::cout<<"PB3_SERVER_READY ports="<<basePort<<".."<<basePort+3<<" loopback-only v2\n"<<std::flush;

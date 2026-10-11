@@ -1,3 +1,27 @@
+# v0.5.0 Public prerelease — YMIR / Mednafen integration
+
+2026-10-11。最新XBANDサーバー／モデム、シリアル対戦、YMIR／Mednafen組み込みソース・差分、仕様書・各組み込みガイドを1つのWindows x64パッケージへ収録。サーバーソース・CMake・回帰試験、収録案内、ハッシュ／必須ファイル／除外対象を検査するスクリプトも追加しました。エミュレーター本体・EXE、BIOS・ゲーム、個人データは配布しません。
+
+MednafenのXBAND対戦・メール・ポイント・度数、通信ログ機能、SCIのDaytona USA Circuit Edition動作確認とゲボッカーズの安定動作についてユーザー報告を反映しました。SCI同期設定は専用スクリプトでONを既定とします。異種エミュレーター間、別PC間、全タイトル、全リセット／状態復元は未検証です。既知制限と各試験の範囲は`docs/RELEASE-VERIFICATION.md`を参照してください。公開済みv0.4.0は変更しません。
+
+# v0.5.0-dev.5 optional Mednafen link cable (historical development record)
+
+YMIR由来のYLS1 TCP部品を共通モジュールとして抽出し、Mednafen 1.32.1の両SH-2へSCIレジスター・タイミング・割り込み・バイトDMA・同期制御を追加する任意差分、ハッシュ検査、専用起動・診断・文書を追加。通常はOFF、同一PCローカル自動ペア・同期ON、XBANDモデムと排他です。既存YMIR差分、XBANDカード・台帳、公開済み配布物は変更しません。共通通信試験と本体結線診断は通過、Daytona USA Circuit Editionの実ゲーム対戦・異種ホスト対戦は未確認です。
+
+# v0.5.0-dev.4 communication log viewer (not published)
+
+HEX/Text見出し右へView communication logs...を追加。Service／Peer／Controlを時刻・方向・セッション・HEX/Text付きJSONLに保存し、200レコードのページ、絞り込み、ページ内検索、自動追従、表示ページ保存、ログフォルダー表示を用意。保存は別スレッドで行い、記録失敗は不完全として表示しゲーム通信を継続します。サーバー通信路の表記をOffline／Connected to XBAND Serverへ、対戦回線をIdle／Calling peer／Incoming call from peer／Connected to peer／Disconnected from peerへ変更。個人情報を含む通信ログは公開パッケージへ同梱しません。
+
+2026-10-11のMednafen試験構成では通常各3度数、勝者+1／敗者0、再接続で二重計上なし、メール送信課金・受信無料のユーザー確認が完了しました。この結果を新しいログUIのゲーム通信試験と同一視しません。
+
+# v0.5.0-dev.3 documentation revision (not published)
+
+統合仕様第4版、サーバーUI・YMIR操作説明、共通／ホスト境界、研究記録の適用範囲を現行ソースに合わせて更新。Mednafen統合仕様を追加。新規環境と既存設定、カード選択の保存差分、未実施のポイント／度数併用試験を明記。YMIRのConfig.phone検査に残る内部番号制約も記録。今回の文書更新でモデム実装・サーバー挙動・公開済み配布物は変更しません。
+
+# v0.5.0-dev.2 local candidate (not published)
+
+Mednafen 1.32.1向け追加ソースモジュール・ハッシュ検査付き統合パッチ・UCRT64ビルド・左右別プロフィール起動手順を追加。共通Windows保存処理へ整理し、Ymir APIは互換エイリアスで維持。新規設定のみ度数処理ON・勝敗ポイント+1/0、Mednafen新カード100度数。既存設定・残高・履歴は変更しません。最新のポイントと度数を併用したゲーム内試験は未実施です。
+
 # v0.4.0 Public prerelease
 
 2026年10月11日。v0.3.1以降のXBAND関連開発をまとめた、Ymir向けソース取り込みキット付きの開発版です。

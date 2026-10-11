@@ -1,0 +1,11 @@
+{
+  "schema": 4,
+  "scope": "server-global",
+  "activation": "explicit-per-letter-policy",
+  "mail_basis": "accepted-outgoing-letter",
+  "mail_enabled": true,
+  "match_enabled": true,
+  "reset_scope": 1,
+  "include_mail": 1,
+  "requested_units": { "mail": 1, "match": 3, "reset": 1 }
+}

@@ -5,12 +5,18 @@ if(-not(Test-Path -LiteralPath $taskExe)){$taskExe=Join-Path $PSScriptRoot 'buil
 if(-not(Test-Path -LiteralPath $taskExe)){throw 'Server executable not found. Extract the Windows release ZIP or build the source.'}
 $taskRuntime=Join-Path $PSScriptRoot 'runtime'
 New-Item -ItemType Directory -Path $taskRuntime -Force | Out-Null
+# Initialize new installations only. Never overwrite saved policies or balances.
+$taskCredit=Join-Path $taskRuntime 'service-credit-settings.json'
+if(-not(Test-Path -LiteralPath $taskCredit)){
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'config/service-credit-defaults.json') -Destination $taskCredit
+}
 $taskVariables=@{
     XBAND_TEST_BASE_PORT=[string]$BasePort
     XBAND_REGION_TABLE_FILE=(Join-Path $PSScriptRoot 'config/jp-area-codes.json')
     XBAND_ACTIVITY_HISTORY_DIR=(Join-Path $taskRuntime 'activity-history')
     XBAND_LOCAL_MAIL_JOURNAL_DIR=(Join-Path $taskRuntime 'mail-journal')
     XBAND_GAME_RESULT_DB_DIR=(Join-Path $taskRuntime 'game-result-db')
+    XBAND_COMMUNICATION_LOG_DIR=(Join-Path $taskRuntime 'communication-logs')
     XBAND_GAME_RANKING_FILE=(Join-Path $taskRuntime 'game-ranking-settings.json')
     XBAND_GAME_POINT_LEDGER_FILE=(Join-Path $taskRuntime 'game-point-ledger.json')
     XBAND_GAME_LEVEL_FILE=(Join-Path $taskRuntime 'game-level-settings.json')
@@ -19,7 +25,7 @@ $taskVariables=@{
     XBAND_SERVICE_CREDIT_FILE=(Join-Path $taskRuntime 'service-credit-settings.json')
     XBAND_SERVICE_CREDIT_LEDGER_FILE=(Join-Path $taskRuntime 'service-credit-settlements.json')
     XBAND_MATCH_CREDIT_EPISODES_FILE=(Join-Path $taskRuntime 'match-credit-episodes.json')
-    XBAND_STANDBY='1';XBAND_POSTMATCH_EXPERIMENT='0'
+    XBAND_STANDBY='1';XBAND_POSTMATCH_EXPERIMENT='1'
 }
 $taskSaved=@{}
 try{

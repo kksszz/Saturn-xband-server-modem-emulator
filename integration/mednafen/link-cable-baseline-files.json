@@ -1,0 +1,10 @@
+{
+  "baseline": "Mednafen 1.32.1 with verified XBAND base patch",
+  "files": {
+    "src/drivers/main.cpp": "31b41faead5e98794f41b3e80383ab0a83d3d47c2710626f0ee3eba10519ad0e",
+    "src/ss/sh7095.h": "0da67870691997f1b17d03b12c339565337d1a142b55e42210dd5cf9b8573f41",
+    "src/ss/sh7095.inc": "1a991326c56b8ad3e123024e73a2471f7c18307b83778aa885094ab57e161d8d",
+    "src/ss/ss.cpp": "230c72b6dfdd1957c25ec4bc20d14e5f08d827de0e5169b6aab4af614edfabdc",
+    "src/ss/ss.h": "1addd6a2500bc45137956d8d891728efbf2145736a208f4e1605fa6047114944"
+  }
+}

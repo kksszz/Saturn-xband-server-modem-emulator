@@ -1,0 +1,258 @@
+diff --git a/src/ss/cart.cpp b/src/ss/cart.cpp
+index e6413b6..e4f6d34 100644
+--- a/src/ss/cart.cpp
++++ b/src/ss/cart.cpp
+@@ -33,11 +33,19 @@
+ #include "cart/rom.h"
+ #include "cart/ar4mp.h"
+ #include "cart/stv.h"
++#include "requested_bus_bridge.hpp"
++#include "command_runtime.h"
++#include "card_runtime.h"
++#include <cstdlib>
++#include "uart_receive_irq.hpp"
++#include "scu.h"
++#include <memory>
+ 
+ namespace MDFN_IEN_SS
+ {
+ 
+ CartInfo Cart;
++#include "xband_probe.inc"
+ 
+ template<typename T>
+ static MDFN_HOT void DummyRead(uint32 A, uint16* DB)
+@@ -132,6 +140,10 @@ void CartInfo::CS2M_SetRW8W16(uint8 Ostart, uint8 Oend, void (*r16)(uint32 A, ui
+ 
+ void CART_Init(const int cart_type, Stream* rom_stream, GameFile* gf, const STVGameInfo* sgi)
+ {
++ Cart.OwnsRequested=nullptr;
++ Cart.RequestedAccess=nullptr;
++ Cart.FrameCompleted=nullptr;
++ Cart.ResetButtonNMI=nullptr;
+  Cart.CS01_SetRW8W16(0x02000000, 0x04FFFFFF, DummyRead<uint16>, DummyWrite<uint8>, DummyWrite<uint16>);
+  Cart.CS2M_SetRW8W16(0x00, 0x3F, DummyRead<uint16>, DummyWrite<uint8>, DummyWrite<uint16>);
+ 
+@@ -179,6 +191,9 @@ void CART_Init(const int cart_type, Stream* rom_stream, GameFile* gf, const STVG
+   case CART_BOOTROM:
+ 	CART_BootROM_Init(&Cart, rom_stream);
+ 	break;
++  case CART_XBAND_PROBE:
++        XbandInit(&Cart);
++        break;
+ 
+ //  case CART_NLMODEM:
+ //	CART_NLModem_Init(&Cart);
+diff --git a/src/ss/cart.h b/src/ss/cart.h
+index dfc95bb..97e7df2 100644
+--- a/src/ss/cart.h
++++ b/src/ss/cart.h
+@@ -30,6 +30,11 @@ namespace MDFN_IEN_SS
+ 
+ struct CartInfo
+ {
++ // Optional original-request hook. Ownership must be side-effect-free.
++ bool (*OwnsRequested)(uint32 A, unsigned width, bool write);
++ void (*RequestedAccess)(uint32 A, unsigned width, bool write, uint32* DB);
++ void (*FrameCompleted)(void);
++ void (*ResetButtonNMI)(void);
+  void (*Reset)(bool powering_up);
+  void (*Kill)(void);
+ 
+@@ -93,6 +98,7 @@ enum
+  CART_CS1RAM_16M = 0x500,
+ 
+  CART_NLMODEM	 = 0x600,
++ CART_XBAND_PROBE = 0x601,
+ 
+  CART_STV	 = 0xE00,
+ 
+@@ -109,5 +115,7 @@ static INLINE void CART_StateAction(StateMem* sm, const unsigned load, const boo
+ static INLINE void CART_GetNVInfo(const char** ext, void** nv_ptr, bool* nv16, uint64* nv_size) { MDFN_HIDE extern CartInfo Cart; Cart.GetNVInfo(ext, nv_ptr, nv16, nv_size); }
+ static INLINE bool CART_GetClearNVDirty(void) { MDFN_HIDE extern CartInfo Cart; return Cart.GetClearNVDirty(); }
+ static INLINE void CART_Reset(bool powering_up) { MDFN_HIDE extern CartInfo Cart; Cart.Reset(powering_up); }
++static INLINE void CART_FrameCompleted(void) { MDFN_HIDE extern CartInfo Cart; if(Cart.FrameCompleted) Cart.FrameCompleted(); }
++static INLINE void CART_ResetButtonNMI(void) { MDFN_HIDE extern CartInfo Cart; if(Cart.ResetButtonNMI) Cart.ResetButtonNMI(); }
+ }
+ #endif
+diff --git a/src/ss/ss.cpp b/src/ss/ss.cpp
+index 3a33c42..592c463 100644
+--- a/src/ss/ss.cpp
++++ b/src/ss/ss.cpp
+@@ -126,6 +126,17 @@ static uint16 BIOSROM[524288 / sizeof(uint16)];
+ static uint16 WorkRAML[1024 * 1024 / sizeof(uint16)];
+ static uint16 WorkRAMH[1024 * 1024 / sizeof(uint16)];	// Effectively 32-bit in reality, but 16-bit here because of CPU interpreter design(regarding fastmap).
+ static uint8 BackupRAM[32768];
++static uint64 XbandCycleBase=0;
++uint64 SS_XbandCycles(){return XbandCycleBase+uint64(std::max<int32>(std::max<int32>(0,CPU[0].timestamp),SH7095_mem_timestamp));}
++uint32 SS_XbandPeekRAM(uint32 address,unsigned width)
++{
++ if(address<0x06000000||address>0x060FFFFF||
++    (width!=1&&width!=2&&width!=4)||(address&(width-1)))return 0;
++ const uint32 offset=address&0xFFFFF;
++ if(width==1)return ne16_rbo_be<uint8>(WorkRAMH,offset);
++ if(width==2)return ne16_rbo_be<uint16>(WorkRAMH,offset);
++ return ne16_rbo_be<uint32>(WorkRAMH,offset);
++}
+ static uint8 BackupRAM_StateHelper[32768];
+ static bool BackupRAM_Dirty;
+ static int64 BackupRAM_SaveDelay;
+@@ -906,6 +917,7 @@ static void Emulate(EmulateSpecStruct* espec_arg)
+  UpdateInputLastBigTS -= (int64)end_ts * cur_clock_div * 1000 * 1000;
+  //
+  SH7095_mem_timestamp -= end_ts; // Update before CPU[n].AdjustTS()
++ XbandCycleBase+=end_ts;
+  //
+  for(unsigned c = 0; c < 2; c++)
+   CPU[c].AdjustTS(-end_ts);
+@@ -921,6 +933,7 @@ static void Emulate(EmulateSpecStruct* espec_arg)
+  //
+  //
+  SMPC_UpdateOutput();
++ CART_FrameCompleted();
+  //
+  //
+  //
+@@ -1334,6 +1347,7 @@ static void MDFN_COLD InitCommon(unsigned cpucache_emumode, unsigned horrible_ha
+    { CART_AR4MP, _("Action Replay 4M Plus"), "ss.cart.satar4mp_path" },
+    { CART_CS1RAM_16M, _("16MiB CS1 RAM"), nullptr },
+    { CART_NLMODEM, _("Netlink Modem"), nullptr },
++   { CART_XBAND_PROBE, _("XBAND modem / media card"), nullptr },
+    { CART_BOOTROM, _("Bootable ROM"), nullptr }, 
+ 
+    { CART_STV, _("ST-V"), nullptr },
+@@ -2330,6 +2344,7 @@ static const MDFNSetting_EnumList RTCLang_List[] =
+  { "extram4", CART_EXTRAM_4M, gettext_noop("4MiB Extended RAM") },					\
+  { "cs1ram16", CART_CS1RAM_16M, gettext_noop("16MiB RAM mapped in A-bus CS1") },			\
+  { "ar4mp", CART_AR4MP, NULL }, /* Undocumented, unfinished. gettext_noop("Action Replay 4M Plus") },*/	\
++ { "xband-probe", CART_XBAND_PROBE, gettext_noop("XBAND modem / media card (experimental)") }, \
+  /* { "nlmodem", CART_NLMODEM, gettext_noop("NetLink Modem") }, */
+ 
+ static const MDFNSetting_EnumList Cart_List[] =
+diff --git a/src/ss/ss.h b/src/ss/ss.h
+index eaf4bd4..28b66b1 100644
+--- a/src/ss/ss.h
++++ b/src/ss/ss.h
+@@ -179,6 +179,9 @@ namespace MDFN_IEN_SS
+  void SS_SetPhysMemMap(uint32 Astart, uint32 Aend, uint16* ptr, uint32 length, bool is_writeable = false) MDFN_COLD;
+ 
+  void SS_Reset(bool powering_up) MDFN_COLD;
++ // XBAND observer: aligned high work-RAM only, no device/timing side effects.
++ uint32 SS_XbandPeekRAM(uint32 address, unsigned width);
++ uint64 SS_XbandCycles();
+ }
+ 
+ #endif
+diff --git a/src/ss/scu.inc b/src/ss/scu.inc
+index 8cc4521..05c5440 100644
+--- a/src/ss/scu.inc
++++ b/src/ss/scu.inc
+@@ -1007,7 +1007,7 @@ static INLINE void BBusRW_DB(uint32 A, uint16* DB, int32* time_thing, int32* dma
+ }
+ 
+ template<typename T, bool IsWrite, bool SH32 = false>
+-static INLINE void ABusRW_DB(uint32 A, uint16* DB, int32* time_thing, int32* dma_time_thing = NULL, int32* sh2_dma_time_thing = NULL)	// add to time_thing, subtract from dma_time_thing
++static INLINE void ABusRW_DB(uint32 A, uint16* DB, int32* time_thing, int32* dma_time_thing = NULL, int32* sh2_dma_time_thing = NULL, bool dispatch = true)	// add to time_thing, subtract from dma_time_thing
+ {
+  //
+  // A-Bus CS0 and CS1
+@@ -1047,6 +1047,7 @@ static INLINE void ABusRW_DB(uint32 A, uint16* DB, int32* time_thing, int32* dma
+    }
+   }
+ 
++  if(!dispatch) return;
+   if(IsWrite)
+   {
+    if(sizeof(T) == 1)
+@@ -1103,6 +1104,7 @@ static INLINE void ABusRW_DB(uint32 A, uint16* DB, int32* time_thing, int32* dma
+     *time_thing += 8;
+   }
+ 
++  if(!dispatch) return;
+   if((A & 0x7FFF) < 0x1000)
+   {
+    const uint32 offset = (A & 0x3F) >> 2;
+@@ -1191,6 +1193,25 @@ static INLINE void SCU_FromSH2_BusRW_DB(uint32 A, uint32* DB, int32* SH2DMAHax)
+  {
+   CheckForceDMAFinish();
+ 
++  MDFN_HIDE extern CartInfo Cart;
++  if(Cart.OwnsRequested && Cart.OwnsRequested(A,sizeof(T),IsWrite))
++  {
++   // Keep the original physical-cycle timing without dispatching a second
++   // device access. This prevents byte UART reads from consuming FIFO twice.
++   uint16 timing_db=0xffff;
++   int32* cpu_time=SH2DMAHax ? NULL : &SH7095_mem_timestamp;
++   if(!IsWrite || sizeof(T)==4)
++   {
++    const uint32 cycle_address=IsWrite ? A : (A &~ 3U);
++    ABusRW_DB<uint16,IsWrite>(cycle_address,&timing_db,cpu_time,NULL,SH2DMAHax,false);
++    ABusRW_DB<uint16,IsWrite,true>(cycle_address | 2,&timing_db,cpu_time,NULL,SH2DMAHax,false);
++   }
++   else
++    ABusRW_DB<T,true>(A,&timing_db,cpu_time,NULL,SH2DMAHax,false);
++   Cart.RequestedAccess(A,sizeof(T),IsWrite,DB);
++   return;
++  }
++
+   if(IsWrite)
+    ABus_Write_DB32<T>(A, *DB, SH2DMAHax ? NULL : &SH7095_mem_timestamp, NULL, SH2DMAHax);
+   else // A-bus reads are always 32-bit(divided into two 16-bit accesses internally)
+diff --git a/src/ss/smpc.cpp b/src/ss/smpc.cpp
+index af6cb31..ca39ece 100644
+--- a/src/ss/smpc.cpp
++++ b/src/ss/smpc.cpp
+@@ -42,6 +42,7 @@ using namespace CDUtility;
+ #include "vdp2.h"
+ #include "cdb.h"
+ #include "scu.h"
++#include "cart.h"
+ 
+ #include "input/gamepad.h"
+ #include "input/3dpad.h"
+@@ -1113,6 +1114,9 @@ sscpu_timestamp_t SMPC_Update(sscpu_timestamp_t timestamp)
+ 
+        if(ResetNMIEnable)
+        {
++        // Observe only the actual console reset-button NMI, not CMD_NMIREQ,
++        // debug/save-state changes or an unaccepted physical press.
++        CART_ResetButtonNMI();
+         CPU[0].SetNMI(false);
+         CPU[0].SetNMI(true);
+ 
+diff --git a/src/drivers/main.cpp b/src/drivers/main.cpp
+index fe6b7f9..b316049 100644
+--- a/src/drivers/main.cpp
++++ b/src/drivers/main.cpp
+@@ -16,6 +16,7 @@
+  */
+ 
+ #include "main.h"
++#include "command_runtime.h"
+ #include <SDL_revision.h>
+ 
+ #ifdef WIN32
+@@ -1280,6 +1281,7 @@ static int GameLoop(void *arg)
+ {
+ 	while(GameThreadRun)
+ 	{
++	 xband_mednafen_host_poll();
+ 	 int16 *sound;
+ 	 int32 ssize;
+ 	 uint32 mcycs;
+@@ -1289,6 +1291,7 @@ static int GameLoop(void *arg)
+ 	 */
+ 	 while(NeedVideoSync)
+ 	 {
++	  xband_mednafen_host_poll();
+ 	  if(!GameThreadRun)
+ 	   return 1;		// Might happen if video initialization failed
+ 
+@@ -1442,6 +1445,7 @@ static int GameLoop(void *arg)
+ 	   FPS_UpdateCalc();
+ 
+ 	   Netplay_GT_CheckPendingLine();
++	   xband_mednafen_host_poll();
+ 
+            if((InFrameAdvance && !NeedFrameAdvance) || GameLoopPaused)
+ 	   {

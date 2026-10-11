@@ -1,9 +1,18 @@
-# XBAND reusable components: first extraction
+# XBAND reusable core and emulator adapters
 
-Development foundation, not a complete modem or LAN server. No Ymir, GUI, OS,
+The shared core is a development foundation, not an exact physical modem.
+Source integration kits now exist for YMIR and Mednafen; see their adapter
+READMEs and the repository's docs/EMULATOR-INTEGRATION-SPEC.md.
+No Ymir, GUI, OS,
 network or third-party headers are required for the default core build.
 The optional JSON adapter requires nlohmann_json 3.12 or newer (3.x).
 This is C++20 source reuse, not a stable C/DLL ABI.
+
+Windows transport/image persistence is shared; bus, IRQ, clocks, profile paths
+and emulation-loop hooks belong to each host adapter. Mednafen uses C ABI calls
+between its C++11 host and the C++20 runtime, not a stable binary plug-in ABI.
+The experiment descriptions below retain their diagnostic scope and opt-in
+defaults; they are not the production launcher's point/credit defaults.
 
 `include/xband/mail_profile_names.hpp` is a bounded, emulator-independent
 observed-name registry keyed by endpoint, profile epoch and local player index.

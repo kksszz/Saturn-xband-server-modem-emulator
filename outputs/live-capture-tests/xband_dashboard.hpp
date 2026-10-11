@@ -28,6 +28,7 @@
 #include "service_credit_window.hpp"
 #include "connection_view.hpp"
 #include "media_card_exchange_window.hpp"
+#include "communication_log_window.hpp"
 #ifdef XBAND_DASHBOARD_RENDER_TEST
 #include <gdiplus.h>
 #include <filesystem>
@@ -45,6 +46,8 @@ class XbandDashboard {
     std::array<std::optional<bool>,2> cardFaultRequests;
     std::array<std::optional<std::string>,2> cardImageRequests;
     diagnostic::MediaCardExchangeWindow cardExchangeWindow;
+    diagnostic::CommunicationLogWindow communicationWindow;
+    std::shared_ptr<diagnostic::CommunicationLog> communicationLog;
     J cardState(unsigned side,uint64_t now)const{
         J state={{"available",false},{"configured",false},{"inserted",false},{"units",nullptr},{"save_failed",false},{"pending",false}};
         if(data.contains("media_cards")&&data.at("media_cards").is_array()&&data.at("media_cards").size()==2)state=data.at("media_cards")[side];
@@ -479,7 +482,7 @@ class XbandDashboard {
     }
     void draw(HDC d){
         rect(d,0,0,1080,880,RGB(13,20,33));
-        text(d,30,8,1000,L"XBAND  /  通信モニター",28);
+        text(d,30,8,1000,L"SATURN XBAND SERVER/MODEM EMULATOR / 通信モニター",24);
         text(d,30,45,1000,L"ローカルTCP   127.0.0.1   |   通信状況 / 読み取り専用   |   500ミリ秒ごとに更新",16,RGB(132,154,180));
         if(data.empty()){text(d,30,130,950,L"サーバーの状態を取得しています...");return;}
         const auto progress=data.value("diagnostic_test_progress",std::string{});
@@ -492,10 +495,10 @@ class XbandDashboard {
             const auto &e=data.at("endpoints")[i];const auto &o=e.at("pb3_observation");
             bool connected=e.at("connected");bool joined=p.at("joined")[i];
             text(d,x+18,137,270,L"MODEM "+std::to_wstring(i+1),24);
-            text(d,x+18,175,270,connected?L"SERVER ONLINE":L"SERVER OFFLINE",18,connected?RGB(63,219,169):RGB(151,165,185));
+            text(d,x+18,175,270,connected?L"Connected to XBAND Server":L"Offline",18,connected?RGB(63,219,169):RGB(151,165,185));
             text(d,x+18,205,270,L"Phone: "+wide(diagnostic::modemSubscriberDisplay(o)),16);
             text(d,x+18,228,280,callTimers[i].display(GetTickCount64()),14,RGB(132,154,180));
-            text(d,x+18,250,270,failed?L"Peer session disconnected":joined?(state==2?L"Peer call connected":state==1?(unsigned(i)==caller?L"Calling modem "+std::to_wstring(callee+1):L"Incoming from modem "+std::to_wstring(caller+1)):L"Waiting for call"):L"Peer endpoint offline",17);
+            text(d,x+18,250,270,failed?L"Disconnected from peer":joined?(state==2?L"Connected to peer":state==1?(unsigned(i)==caller?L"Calling peer":L"Incoming call from peer"):L"Idle"):L"Offline",17);
             text(d,x+18,299,270,L"Service: UP "+wide(o.at("received").get<std::string>())+L" B / DOWN "+wide(o.at("sent").get<std::string>())+L" B",15);
             text(d,x+18,323,270,wide(xband::monitor::mailSavedLine(o)),13);
             text(d,x+18,347,270,wide(xband::monitor::mailIncomingLine(o)),13);
@@ -524,6 +527,8 @@ class XbandDashboard {
             L"Generation "+std::to_wstring(p.at("generation").get<uint64_t>()),14);
         text(d,391,366,295,wide(xband::monitor::mailStorageLine(capture)),12,RGB(132,154,180));
         if(capture.value("enabled",false))text(d,391,395,295,L"Saved != delivered\nNo delivery / read receipt",13,RGB(255,207,125));
+        text(d,391,444,295,L"XBAND接続先：0120-717360",18,RGB(255,207,125));
+        text(d,391,477,295,L"ROM内の発信番号\n実際の通信先はローカルTCP",13,RGB(132,154,180));
         const auto links=xband::monitor::connectionView(data,{telephoneLine[0].load(),telephoneLine[1].load()});
         const auto green=RGB(63,219,169),gray=RGB(132,154,180),amber=RGB(255,207,125);
         rect(d,30,560,1020,124,RGB(25,38,57));
@@ -549,7 +554,7 @@ class XbandDashboard {
             auto sent=p.at("sent")[i].get<uint64_t>();auto received=p.at("received")[1-i].get<uint64_t>();
             text(d,48+i*510,648,492,(i?L"2 → 1":L"1 → 2")+std::wstring(active?L" 通信中 ":L" 停止 ")+std::to_wstring(active?rate[i]:0)+L" B/s  受付 "+std::to_wstring(sent)+L" / 配送 "+std::to_wstring(received)+L" / 待ち "+std::to_wstring(sent>=received?sent-received:0)+L" B",13,active?green:gray);
         }
-        text(d,30,696,1020,L"Recent game bytes: HEX + ASCII text (binary = \\xHH; not protocol decoding)",14,RGB(132,154,180));
+        text(d,30,696,790,L"Recent game bytes: HEX + ASCII text (binary = \\xHH; not protocol decoding)",14,RGB(132,154,180));
         for(int i=0;i<2;++i){
             const auto bytes=data.value(i?"hex1":"hex0",std::string("--"));
             const std::wstring direction=i?L"2 -> 1  ":L"1 -> 2  ";
@@ -563,6 +568,13 @@ class XbandDashboard {
     }
     static void layoutButtons(HWND w){
         RECT r{};GetClientRect(w,&r);const int ids[]={979,978,950,975,900,976};
+        if(auto h=GetDlgItem(w,998)){
+            const int x=820*r.right/1080,y=689*r.bottom/880,width=230*r.right/1080,height=25*r.bottom/880;
+            RECT old{};GetWindowRect(h,&old);MapWindowPoints(nullptr,w,reinterpret_cast<POINT*>(&old),2);
+            if(old.left!=x||old.top!=y||old.right-old.left!=width||old.bottom-old.top!=height)MoveWindow(h,x,y,width,height,TRUE);
+            const auto font=GetStockObject(DEFAULT_GUI_FONT);
+            if(SendMessageW(h,WM_GETFONT,0,0)!=reinterpret_cast<LRESULT>(font))SendMessageW(h,WM_SETFONT,reinterpret_cast<WPARAM>(font),TRUE);
+        }
         const int count=GetDlgItem(w,976)?6:5,step=count==6?170:206,width=count==6?160:194;
         for(int i=0;i<count;++i)if(auto h=GetDlgItem(w,ids[i])){
             const int x=(30+i*step)*r.right/1080,y=76*r.bottom/880;
@@ -590,6 +602,7 @@ class XbandDashboard {
         if(m==WM_NCCREATE){s=static_cast<XbandDashboard*>(reinterpret_cast<CREATESTRUCTW*>(b)->lpCreateParams);SetWindowLongPtrW(w,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(s));}
         if(!s)return DefWindowProcW(w,m,a,b);
         if(m==WM_CREATE){
+            CreateWindowW(L"BUTTON",L"View communication logs...",WS_CHILD|WS_VISIBLE|WS_TABSTOP,0,0,0,0,w,reinterpret_cast<HMENU>(INT_PTR(998)),GetModuleHandleW(nullptr),nullptr);
             for(int i=0;i<2;++i)CreateWindowW(L"BUTTON",L"電話線を切断（OFF）",WS_CHILD|WS_VISIBLE|WS_TABSTOP,0,0,0,0,w,reinterpret_cast<HMENU>(INT_PTR(990+i)),GetModuleHandleW(nullptr),nullptr);
             for(int i=0;i<2;++i)CreateWindowW(L"BUTTON",L"カード状態を取得できません",WS_CHILD|WS_VISIBLE|WS_TABSTOP|WS_DISABLED,0,0,0,0,w,reinterpret_cast<HMENU>(INT_PTR(992+i)),GetModuleHandleW(nullptr),nullptr);
             for(int i=0;i<2;++i)CreateWindowW(L"BUTTON",L"読取異常：未対応",WS_CHILD|WS_VISIBLE|WS_TABSTOP|WS_DISABLED,0,0,0,0,w,reinterpret_cast<HMENU>(INT_PTR(994+i)),GetModuleHandleW(nullptr),nullptr);
@@ -640,6 +653,10 @@ class XbandDashboard {
             InvalidateRect(w,nullptr,FALSE);return 0;
         }
         if(m==WM_COMMAND&&LOWORD(a)==979){s->openMail(w);return 0;}
+        if(m==WM_COMMAND&&LOWORD(a)==998){
+            std::shared_ptr<diagnostic::CommunicationLog> journal;{std::lock_guard lock(s->mutex);journal=s->communicationLog;}
+            s->communicationWindow.open(w,std::move(journal));return 0;
+        }
         if(m==WM_COMMAND&&LOWORD(a)==978){s->activityWindow.open(w);return 0;}
         if(m==WM_COMMAND&&LOWORD(a)==900){s->openRankings(w);return 0;}
         if(m==WM_COMMAND&&LOWORD(a)==950){s->openUsage(w);return 0;}
@@ -651,6 +668,7 @@ class XbandDashboard {
         if(m==WM_DESTROY){s->closed=true;s->hwnd=nullptr;PostQuitMessage(0);return 0;}return DefWindowProcW(w,m,a,b);
     }
 public:
+    void setCommunicationLog(std::shared_ptr<diagnostic::CommunicationLog> value){std::lock_guard lock(mutex);communicationLog=std::move(value);}
     bool telephoneLineConnected(unsigned side)const{return telephoneLine.at(side).load();}
     std::optional<bool> takeCardRequest(unsigned side){std::lock_guard lock(mutex);return std::exchange(cardRequests.at(side),std::nullopt);}
     std::optional<bool> takeCardFaultRequest(unsigned side){std::lock_guard lock(mutex);return std::exchange(cardFaultRequests.at(side),std::nullopt);}
@@ -912,7 +930,7 @@ public:
                 int saved=SaveDC(dc);SetViewportOrgEx(dc,r.left,r.top,nullptr);SendMessageW(h,WM_PRINT,reinterpret_cast<WPARAM>(dc),PRF_CLIENT|PRF_NONCLIENT);RestoreDC(dc,saved);
             }
             proc(w,WM_CREATE,0,0);fixture.syncCardButtons(w);
-            for(int id:{990,991,992,993,994,995,996,997}){
+            for(int id:{990,991,992,993,994,995,996,997,998}){
                 auto h=GetDlgItem(w,id);RECT r{};GetWindowRect(h,&r);MapWindowPoints(nullptr,w,reinterpret_cast<POINT*>(&r),2);
                 int saved=SaveDC(dc);SetViewportOrgEx(dc,r.left,r.top,nullptr);SendMessageW(h,WM_PRINT,reinterpret_cast<WPARAM>(dc),PRF_CLIENT|PRF_NONCLIENT);RestoreDC(dc,saved);
             }
@@ -1003,7 +1021,7 @@ public:
     }
 #endif
     XbandDashboard(){worker=std::thread([this]{WNDCLASSW c{};c.lpfnWndProc=proc;c.hInstance=GetModuleHandleW(nullptr);c.lpszClassName=L"XbandDashboard";c.hCursor=LoadCursor(nullptr,IDC_ARROW);RegisterClassW(&c);
-        HWND w=CreateWindowW(c.lpszClassName,L"XBANDサーバー | 通信モニター",WS_OVERLAPPEDWINDOW|WS_CLIPCHILDREN,CW_USEDEFAULT,CW_USEDEFAULT,1100,930,nullptr,nullptr,c.hInstance,this);hwnd=w;if(w){ShowWindow(w,SW_SHOWNOACTIVATE);SetTimer(w,1,250,nullptr);}ready=true;if(!w)return;MSG msg;while(GetMessage(&msg,nullptr,0,0)>0){TranslateMessage(&msg);DispatchMessage(&msg);}});while(!ready)Sleep(1);if(!hwnd){worker.join();throw std::runtime_error("Dashboard creation failed");}}
+        HWND w=CreateWindowW(c.lpszClassName,L"SATURN XBAND SERVER/MODEM EMULATOR / 通信モニター",WS_OVERLAPPEDWINDOW|WS_CLIPCHILDREN,CW_USEDEFAULT,CW_USEDEFAULT,1100,930,nullptr,nullptr,c.hInstance,this);hwnd=w;if(w){ShowWindow(w,SW_SHOWNOACTIVATE);SetTimer(w,1,250,nullptr);}ready=true;if(!w)return;MSG msg;while(GetMessage(&msg,nullptr,0,0)>0){TranslateMessage(&msg);DispatchMessage(&msg);}});while(!ready)Sleep(1);if(!hwnd){worker.join();throw std::runtime_error("Dashboard creation failed");}}
     ~XbandDashboard(){if(auto w=hwnd.load())PostMessage(w,WM_CLOSE,0,0);if(worker.joinable())worker.join();}
     bool isClosed()const{return closed;}
     void publish(const J&v){std::lock_guard lock(mutex);const auto now=GetTickCount64();const auto&p=v.at("pair_control");

@@ -1,5 +1,7 @@
 # XBAND サーバーコマンド仕様 下書き
 
+2026-10-11の現行仕様注記：本書は日付付きの解析経緯・仮説・隔離試験を保存する研究記録です。採用済みの通信・料金・カード・ポイントは[統合仕様 第4版](SERVER-MODEM-SPEC.md)、ホスト差分は[エミュレーター統合仕様](EMULATOR-INTEGRATION-SPEC.md)を優先してください。旧記録の接続単位課金、双方接続必須、カード交換に再起動が必要、既定無効などを現行手順として使わないでください。送信通数課金はv0.4.0から公開済み、新規環境の消費ON・全標準ゲーム勝者+1／敗者0・Mednafen新規100度数カードはv0.5.0開発版です。既存設定・残数・台帳は保持します。Mednafenでのポイント／度数同時有効のゲーム内試験は利用者が確認済みです。確認範囲と制限は[リリース検証記録](RELEASE-VERIFICATION.md)を参照してください。
+
 試験構成は、まずは同一PC上でサーバーと左右2つの対応エミュレーターを動かすものを基準とする。本書の隔離解析・通信回帰・実画面確認を、別PC間のLAN接続やインターネット越しの対戦の動作確認として扱わない。
 
 開発終了時に統合する通信仕様の解析記録。対象は、対戦エリアとプレー時間の表示を更新するコマンド32、対戦エリアの設定項目を更新する4C、および端末が設定値を報告する1Cである。サーバーは4Cで設定項目を操作不可にできる。ゲームDISC(ROM)には複数の選択肢をオフラインで切り替える処理があり、設定値の保存形式と送信形式も確認済みである。ユーザーの実画面試験でエリアの切り替えとプレー時間の表示を確認した。再起動後の選択値保持と時間外の接続拒否は別途操作確認が必要である。時間帯制限は今回のサーバーで判定する。当時のゲームDISC(ROM)自身による曜日や時刻の制限判定は未解明である。
@@ -228,7 +230,7 @@ v44のサーバー設定画面では、登録電話番号ごとに次のモー�
 | 期限比較 | `060940C0` から `060940D6` | 開始値と長さの和が現在値より大きい場合に継続側へ進む |
 | 待機終了通知 | `060943D4` | 処理中ならイベント13を再予約。終了可能なら通知0062を呼ぶ |
 
-カウンターは年月日を保持する時計ではない。割り込みベクター40は、[エミュレーターのSCU定義](../work/ymir/libs/ymir-core/include/ymir/hw/scu/scu_defs.hpp:17)ではVBlank INであり、登録先から描画フレームに対応するカウンターと判断できる。実際の秒数への換算は割り込み周期の別検証が必要であり、0Eの値を秒数として記載しない。コマンド04の保存値 `060B907C` と `060B9080` はこの期限比較では参照されない。
+カウンターは年月日を保持する時計ではない。割り込みベクター40は、エミュレーターのSCU定義（開発時の記録、配布対象外：`work/ymir/libs/ymir-core/include/ymir/hw/scu/scu_defs.hpp:17`）ではVBlank INであり、登録先から描画フレームに対応するカウンターと判断できる。実際の秒数への換算は割り込み周期の別検証が必要であり、0Eの値を秒数として記載しない。コマンド04の保存値 `060B907C` と `060B9080` はこの期限比較では参照されない。
 
 隔離テストで、開始値12345、長さ1800に対し、現在値14144では継続、14145および14146では終了側への分岐を確認した。日付側の二つの保存値を変更した計24ケースでも結果は変わらない。経過値の引き算とカウンター増加は32ビットの折り返しも確認した。ただし、期限比較そのものの折り返し時の妥当性や、実画面からの待機全体の動作を確認したものではない。システム呼び出しの振り分けだけを隔離用に置き換え、時計取得と比較は元のゲームDISC(ROM)命令を実行した。
 
@@ -250,7 +252,7 @@ v44のサーバー設定画面では、登録電話番号ごとに次のモー�
 
 受信02の処理0602C768は02を返信する処理へ進み、0602C788でFED3を返す。サービス受信ループの末尾0602A000はこの値を比較し、一致時に戻り値を0にして状態63をコールバックへ渡す。コールバック呼び出し0602A43Cは、サービス呼出側が渡した関数と文脈を使う。画面側06096500は060967FCをコールバックとして渡す。060967FCは状態に01F4を加え、00390006で文字列を取得し、画面部品のプロパティ7へ渡す。状態63は0257、状態64は0258となる。表示文を選ぶこの終了分岐は、待機有効値や発着信方向、対戦相手の決定状態を判定しない。
 
-隔離テスト[vf_service_end_caption_rom_test.cpp](../outputs/live-capture-tests/vf_service_end_caption_rom_test.cpp)では、正常終了FED3と受信失敗FED2、待機有効と無効、方向0と1を組み合わせた8ケースが成功した。元の終了分岐、コールバック、文字列取得と画面更新のラッパーを実行し、正常終了時だけ0257の取得と画面更新が要求された。待機と方向の保存値は変わらない。FED3またはFED2と呼出側の文脈はテストが与え、文字列取得・描画・ソケット後処理は代替している。これは当時のサーバー応答や実際の回線切断までを再現した試験ではない。
+隔離テストvf_service_end_caption_rom_test.cpp（開発時の記録、配布対象外：`outputs/live-capture-tests/vf_service_end_caption_rom_test.cpp`）では、正常終了FED3と受信失敗FED2、待機有効と無効、方向0と1を組み合わせた8ケースが成功した。元の終了分岐、コールバック、文字列取得と画面更新のラッパーを実行し、正常終了時だけ0257の取得と画面更新が要求された。待機と方向の保存値は変わらない。FED3またはFED2と呼出側の文脈はテストが与え、文字列取得・描画・ソケット後処理は代替している。これは当時のサーバー応答や実際の回線切断までを再現した試験ではない。
 
 00400007の引数65を画面表示IDと解釈しない。元の登録処理06029A8Aは00400007を0602A134へ登録しており、同処理はモデム設定リソース010D:0065から文字列0105:02C1を選ぶ。元DRAMDBの本文はATコマンドである。画面文字列の状態63・64とは別の番号体系であり、待機分岐テストの旧caption65という名称もmodemSetup65へ訂正した。
 
@@ -296,7 +298,7 @@ ServerCore.hの待機期限の説明は、着信側が相手の電話を待つ�
 
 長時間の条件では、元ゲームDISC(ROM)のTCP終了要求と通信後処理を観測し、02の送信も元の02処理への到達もなかった。終了画像は「申し訳ありません。XBANDへの接続がうまく行きませんでした。もう一度おかけ直し下さい。」である。通信終了時刻を細かく採取していないため、1800の値から実時間の秒数を断定しない。また、後処理直前の `0602A02E` のR0はサービスの最終戻り値ではないため、R0が0であることを正常終了の根拠にしない。
 
-証拠は[3条件のログフォルダー](../outputs/live-capture-tests/service-hold-20261007-135852)、[診断ソース](../outputs/live-capture-tests/xband_generic_boot.cpp)、[ログ検証スクリプト](../outputs/live-capture-tests/check-service-hold-evidence.ps1)に保存した。終了画面は `outputs/ymir-xband-investigation` の同試験名でshort、deadline、timeoutそれぞれの11999.bmpを目視確認した。ログ検証は保存された処理順序の確認であり、画像の自動判定ではない。
+証拠は3条件のログフォルダー（開発時の記録、配布対象外：`outputs/live-capture-tests/service-hold-20261007-135852`）、診断ソース（開発時の記録、配布対象外：`outputs/live-capture-tests/xband_generic_boot.cpp`）、ログ検証スクリプト（開発時の記録、配布対象外：`outputs/live-capture-tests/check-service-hold-evidence.ps1`）に保存した。終了画面は `outputs/ymir-xband-investigation` の同試験名でshort、deadline、timeoutそれぞれの11999.bmpを目視確認した。ログ検証は保存された処理順序の確認であり、画像の自動判定ではない。
 
 ゲームDISC(ROM)本文の差し替えや稼働版v48の接続方式変更は行っていない。接続保持方式には受信タイムアウトへの対処、接続中の表示と待機終了処理、相手成立後の回線移行の確認が必要である。これらを独自通知やゲームDISC(ROM)パッチで代用せず、元のコマンドと状態遷移の解明対象とする。
 
@@ -314,7 +316,7 @@ SMPCはサターンの周辺機器と実時計を扱う。元のゲームDISC(RO
 | 継続要求 | `0601DDDC` | `80` | `08` | `F0` | `10` |
 | 中断要求 | `0601DE28` | `40` | `08` | `F0` | `10` |
 
-[エミュレーターのSMPC実装](../work/ymir/libs/ymir-core/src/ymir/hw/smpc/smpc.cpp:728)では、INTBACKのシステム状態要求はIREG0が01の場合であり、IREG1のビット3は周辺機器データ要求である。上記はコントローラー情報の要求で、実時計を含むシステム状態要求ではない。RTCの年月日、曜日、時分秒はシステム状態のOREG1からOREG7に入る。隔離テストでは、三処理ともSFの状態読み出しと上記の書き込みだけを行い、RTCの出力レジスターを読まなかった。
+エミュレーターのSMPC実装（開発時の記録、配布対象外：`work/ymir/libs/ymir-core/src/ymir/hw/smpc/smpc.cpp:728`）では、INTBACKのシステム状態要求はIREG0が01の場合であり、IREG1のビット3は周辺機器データ要求である。上記はコントローラー情報の要求で、実時計を含むシステム状態要求ではない。RTCの年月日、曜日、時分秒はシステム状態のOREG1からOREG7に入る。隔離テストでは、三処理ともSFの状態読み出しと上記の書き込みだけを行い、RTCの出力レジスターを読まなかった。
 
 静的に確認した汎用SMPC要求処理 `06009304` と `06093DC4` も、IREG0とIREG1に00、IREG2にF0を設定してから指定コマンドを送る。これも、その設定のままINTBACKを送る場合に実時計を要求する経路ではない。BIOSや計算で生成したアドレスを介する別経路の存在は、この確認範囲から排除できない。
 
@@ -475,30 +477,30 @@ VF Remixの元のDRAMDBには、`0105:0062` に対戦相手を見つけられな
 
 ## 実装と参照資料
 
-- [指名未待機要求とゲームDISC(ROM)待機返信の再生試験](../outputs/live-capture-tests/named_rom_wait_test.cpp)
-- [サービス受信の空キューと終了経路の隔離試験](../outputs/live-capture-tests/vf_service_empty_read_rom_test.cpp)
+- 指名未待機要求とゲームDISC(ROM)待機返信の再生試験（開発時の記録、配布対象外：`outputs/live-capture-tests/named_rom_wait_test.cpp`）
+- サービス受信の空キューと終了経路の隔離試験（開発時の記録、配布対象外：`outputs/live-capture-tests/vf_service_empty_read_rom_test.cpp`）
 - [ゲーム別の勝者と敗者設定](../outputs/live-capture-tests/game_ranking_settings.hpp)
 - [結果報告の配点判定](../outputs/live-capture-tests/game_point_history.hpp)
-- [既存累積台帳と勝者敗者のサービス返信試験](../outputs/live-capture-tests/game_point_ledger_test.cpp)
+- 既存累積台帳と勝者敗者のサービス返信試験（開発時の記録、配布対象外：`outputs/live-capture-tests/game_point_ledger_test.cpp`）
 - [サーバー共通待ち時間の保存と検証](../outputs/live-capture-tests/standby_wait_settings.hpp)
-- [待ち時間と通知文の共通サービス試験](../outputs/live-capture-tests/standby_wait_settings_test.cpp)
+- 待ち時間と通知文の共通サービス試験（開発時の記録、配布対象外：`outputs/live-capture-tests/standby_wait_settings_test.cpp`）
 - [サーバーの対戦エリア返信](../outputs/live-capture-tests/usage_area_settings.hpp)
-- [4Cとオフライン選択の隔離テスト](../outputs/live-capture-tests/vf_usage_setting_rom_test.cpp)
-- [任意選択モードと報告値のサーバーテスト](../outputs/live-capture-tests/usage_area_settings_test.cpp)
-- [保存済み指名と自動接続要求の返信再生テスト](../outputs/live-capture-tests/usage_area_service_test.cpp)
-- [共通XBANDプログラムの確認](../outputs/live-capture-tests/common-xos-20261007.md)
+- 4Cとオフライン選択の隔離テスト（開発時の記録、配布対象外：`outputs/live-capture-tests/vf_usage_setting_rom_test.cpp`）
+- 任意選択モードと報告値のサーバーテスト（開発時の記録、配布対象外：`outputs/live-capture-tests/usage_area_settings_test.cpp`）
+- 保存済み指名と自動接続要求の返信再生テスト（開発時の記録、配布対象外：`outputs/live-capture-tests/usage_area_service_test.cpp`）
+- 共通XBANDプログラムの確認（開発時の記録、配布対象外：`outputs/live-capture-tests/common-xos-20261007.md`）
 - [ユーザー提供の動画参照 13分03秒付近](https://www.youtube.com/watch?v=J9tP0j4Cdzk&t=783s)。操作画面の照合にはユーザー添付の全国と同一局番内の画像を使用。
-- [プレー時間の表示受信と画面コピーの隔離テスト](../outputs/live-capture-tests/vf_usage_area_rom_test.cpp)
-- [時間帯制限の隔離テスト](../outputs/live-capture-tests/usage_time_policy_test.cpp)
-- [ゲームDISC(ROM)内部時計と待機期限の隔離テスト](../outputs/live-capture-tests/vf_usage_clock_rom_test.cpp)
-- [SMPC周辺機器要求の隔離テスト](../outputs/live-capture-tests/vf_smpc_request_rom_test.cpp)
-- [日付受信とスナップショットの隔離テスト](../outputs/live-capture-tests/vf_date_rom_test.cpp)
-- [通知登録からサービス正常終了までの隔離テスト](../outputs/live-capture-tests/vf_service_notice_end_rom_test.cpp)
-- [通知の表示条件と削除要求の隔離テスト](../outputs/live-capture-tests/vf_notice_display_rom_test.cpp)
-- [サービス接続前の待機解除の隔離テスト](../outputs/live-capture-tests/vf_service_standby_reset_rom_test.cpp)
-- [コマンド0Dの受信処理登録解除の隔離テスト](../outputs/live-capture-tests/vf_receive_handler_disable_rom_test.cpp)
-- [コマンド0E受信の隔離テスト](../outputs/live-capture-tests/vf_receiver_timer_rom_test.cpp)
-- [待機終了通知の隔離テスト](../outputs/live-capture-tests/vf_wait_end_notice_rom_test.cpp)
+- プレー時間の表示受信と画面コピーの隔離テスト（開発時の記録、配布対象外：`outputs/live-capture-tests/vf_usage_area_rom_test.cpp`）
+- 時間帯制限の隔離テスト（開発時の記録、配布対象外：`outputs/live-capture-tests/usage_time_policy_test.cpp`）
+- ゲームDISC(ROM)内部時計と待機期限の隔離テスト（開発時の記録、配布対象外：`outputs/live-capture-tests/vf_usage_clock_rom_test.cpp`）
+- SMPC周辺機器要求の隔離テスト（開発時の記録、配布対象外：`outputs/live-capture-tests/vf_smpc_request_rom_test.cpp`）
+- 日付受信とスナップショットの隔離テスト（開発時の記録、配布対象外：`outputs/live-capture-tests/vf_date_rom_test.cpp`）
+- 通知登録からサービス正常終了までの隔離テスト（開発時の記録、配布対象外：`outputs/live-capture-tests/vf_service_notice_end_rom_test.cpp`）
+- 通知の表示条件と削除要求の隔離テスト（開発時の記録、配布対象外：`outputs/live-capture-tests/vf_notice_display_rom_test.cpp`）
+- サービス接続前の待機解除の隔離テスト（開発時の記録、配布対象外：`outputs/live-capture-tests/vf_service_standby_reset_rom_test.cpp`）
+- コマンド0Dの受信処理登録解除の隔離テスト（開発時の記録、配布対象外：`outputs/live-capture-tests/vf_receive_handler_disable_rom_test.cpp`）
+- コマンド0E受信の隔離テスト（開発時の記録、配布対象外：`outputs/live-capture-tests/vf_receiver_timer_rom_test.cpp`）
+- 待機終了通知の隔離テスト（開発時の記録、配布対象外：`outputs/live-capture-tests/vf_wait_end_notice_rom_test.cpp`）
 - [ユーザー提供の動画参照 10分48秒付近](https://www.youtube.com/watch?v=J9tP0j4Cdzk&t=648s)。プレー時間の二行表示にはユーザー添付の使用状況画面を使用。
 
 テストは `vf_usage_setting_rom_test.exe` に元のVirtua Fighter RemixのTrack 01を引数として渡して再現できる。同じXBANDプログラムを含む手元の8タイトルへの共通適用が想定されるが、全タイトルの実画面確認を意味しない。

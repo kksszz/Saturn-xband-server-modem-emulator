@@ -1,0 +1,316 @@
+warning: in the working copy of 'src/ss/sh7095.h', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'src/ss/sh7095.inc', LF will be replaced by CRLF the next time Git touches it
+diff --git a/src/drivers/main.cpp b/src/drivers/main.cpp
+index b316049..2594c8c 100644
+--- a/src/drivers/main.cpp
++++ b/src/drivers/main.cpp
+@@ -17,6 +17,7 @@
+ 
+ #include "main.h"
+ #include "command_runtime.h"
++#include "cable_runtime.h"
+ #include <SDL_revision.h>
+ 
+ #ifdef WIN32
+@@ -1277,11 +1278,14 @@ bool DebuggerFudge(void)
+  return true;
+ }
+ 
++static int LinkCableCancelled(void){return !GameThreadRun;}
+ static int GameLoop(void *arg)
+ {
++ xband_cable_set_cancel(LinkCableCancelled);
+ 	while(GameThreadRun)
+ 	{
+ 	 xband_mednafen_host_poll();
++         xband_cable_poll();
+ 	 int16 *sound;
+ 	 int32 ssize;
+ 	 uint32 mcycs;
+diff --git a/src/ss/sh7095.h b/src/ss/sh7095.h
+index 2eb8e99..540f283 100644
+--- a/src/ss/sh7095.h
++++ b/src/ss/sh7095.h
+@@ -38,6 +38,9 @@ class SH7095 final
+ 
+  void ForceInternalEventUpdates(void);
+  void AdjustTS(int32 delta);
++#ifdef XBAND_MEDNAFEN_LINK_CABLE
++ void CableSCIPoll(void);
++#endif
+  void SetActive(bool active);
+ 
+  void TruePowerOn(void) MDFN_COLD;
+@@ -467,6 +470,9 @@ class SH7095 final
+  } SCI;
+ 
+  void SCI_Reset(void) MDFN_COLD;
++#ifdef XBAND_MEDNAFEN_LINK_CABLE
++ ::saturn::link::SciState CableSCI;
++#endif
+ 
+  //
+  //
+diff --git a/src/ss/sh7095.inc b/src/ss/sh7095.inc
+index bf337f4..3bb57a1 100644
+--- a/src/ss/sh7095.inc
++++ b/src/ss/sh7095.inc
+@@ -510,7 +510,12 @@ void SH7095::AdjustTS(int32 delta)
+ // de=1, dme=1, te=0, nmif=0, ae=0
+ INLINE bool SH7095::DMA_RunCond(unsigned ch)
+ {
+- return ((DMAOR & 0x07) == 0x01) && ((DMACH[ch].CHCR & 0x03) == 0x01);
++ const bool enabled=((DMAOR & 0x07) == 0x01) && ((DMACH[ch].CHCR & 0x03) == 0x01);
++#ifdef XBAND_MEDNAFEN_LINK_CABLE
++ if(enabled && xband_cable_enabled() && !(DMACH[ch].CHCR&0x200))
++  return CableSCI.dmaReady(DMACH[ch].DRCR);
++#endif
++ return enabled;
+ }
+ 
+ bool SH7095::DMA_InBurst(void)
+@@ -559,7 +564,17 @@ INLINE void SH7095::DMA_DoTransfer(unsigned ch)
+ 	{
+ 	 uint8 buffer;
+ 
++#ifdef XBAND_MEDNAFEN_LINK_CABLE
++         if(xband_cable_enabled() && sar==0xFFFFFE05)
++          {buffer=CableSCI.dmaRead();DMA_Timestamp+=2;RecalcPendingIntPEX();}
++         else
++#endif
+ 	 buffer = BSC_BusRead<uint8>(sar & 0x07FFFFFF, false, &DMA_Timestamp);
++#ifdef XBAND_MEDNAFEN_LINK_CABLE
++         if(xband_cable_enabled() && dar==0xFFFFFE03)
++          {CableSCI.dmaWrite(buffer,SS_XbandCycles());DMA_Timestamp+=2;RecalcPendingIntPEX();}
++         else
++#endif
+ 	 BSC_BusWrite<uint8>(dar & 0x07FFFFFF, buffer, false, &DMA_Timestamp);
+ 
+ 	 sar += ainc[0][sm];
+@@ -657,6 +672,9 @@ INLINE void SH7095::DMA_DoTransfer(unsigned ch)
+ 
+ sscpu_timestamp_t SH7095::DMA_Update(sscpu_timestamp_t et)
+ {
++#ifdef XBAND_MEDNAFEN_LINK_CABLE
++ CableSCIPoll();
++#endif
+ #ifdef MDFN_ENABLE_DEV_BUILD
+  assert(timestamp != SS_EVENT_DISABLED_TS);
+ #endif
+@@ -1238,6 +1256,9 @@ void SH7095::SCI_Reset(void)
+  //
+  SCI.RSR = 0x00;
+  SCI.TSR = 0x00;
++#ifdef XBAND_MEDNAFEN_LINK_CABLE
++ CableSCI.reset();
++#endif
+ 
+  RecalcPendingIntPEX();
+ }
+@@ -1245,6 +1266,19 @@ void SH7095::SCI_Reset(void)
+ 
+ //
+ //
++// Byte callbacks only; networking is owned by the link worker.
++#ifdef XBAND_MEDNAFEN_LINK_CABLE
++void SH7095::CableSCIPoll(void)
++{
++ if(!xband_cable_enabled())return;
++ const bool master=this==&CPU[0];
++ const uint64 now=SS_XbandCycles();
++ const uint8 before=CableSCI.SSR;
++ CableSCI.tick(now,[&](uint8 b,uint64 cycle){xband_cable_send(master,b,cycle);},
++  [&](uint64 cycle){return xband_cable_receive(master,cycle);});
++ if(before!=CableSCI.SSR)RecalcPendingIntPEX();
++}
++#endif
+ // End SCI
+ //
+ //
+@@ -1255,6 +1289,16 @@ void SH7095::SCI_Reset(void)
+ template<typename T>
+ NO_INLINE MDFN_HOT void SH7095::OnChipRegWrite(uint32 A, uint32 V)
+ {
++#ifdef XBAND_MEDNAFEN_LINK_CABLE
++ if(xband_cable_enabled() && sizeof(T)==1 && !(A&0x100) && (A&0xFF)<=5)
++ {
++  CableSCIPoll();
++  if((A&0xFF)==2 && !(CableSCI.SCR&0x10) && (V&0x10))
++   for(unsigned i=0;i<65536;++i)if(xband_cable_receive(this==&CPU[0],SS_XbandCycles())<0)break;
++  CableSCI.write(A&0xFF,uint8(V),SS_XbandCycles());
++  RecalcPendingIntPEX();return;
++ }
++#endif
+  SS_DBGTI(SS_DBG_SH2_REGW, "[%s] %zu-byte write to on-chip register area; address=0x%08x value=0x%08x, PC=0x%08x\n", cpu_name, sizeof(T), A, V, PC);
+ 
+  if(A & 0x100)
+@@ -1612,6 +1656,9 @@ NO_INLINE MDFN_HOT void SH7095::OnChipRegWrite(uint32 A, uint32 V)
+    case 0x71:
+    case 0x72:
+ 	DMACH[(A & 1) ^ 1].DRCR = V & 0x3;
++#ifdef XBAND_MEDNAFEN_LINK_CABLE
++        if(xband_cable_enabled())DMA_RecalcRunning();
++#endif
+ 	break;
+ 
+ 
+@@ -1754,6 +1801,10 @@ NO_INLINE MDFN_HOT void SH7095::OnChipRegWrite(uint32 A, uint32 V)
+ template<typename T>
+ INLINE T SH7095::OnChipRegRead_INLINE(uint32 A)
+ {
++#ifdef XBAND_MEDNAFEN_LINK_CABLE
++ if(xband_cable_enabled() && sizeof(T)==1 && !(A&0x100) && (A&0xFF)<=5)
++ {CableSCIPoll();return T(CableSCI.read(A&0xFF));}
++#endif
+  if(A & 0x100)
+  {
+   uint32 ret = 0;
+@@ -3077,6 +3128,17 @@ uint8 INLINE SH7095::GetPendingInt(uint8* vecnum_out)
+     vecnum = (VCRB >> 0) & 0x7F;
+   }
+  }
++#endif
++#ifdef XBAND_MEDNAFEN_LINK_CABLE
++ if(xband_cable_enabled())
++ {
++  const unsigned irq=CableSCI.interrupt();
++  if(irq && (tmp_ipr=((IPRB>>12)&15))>ipr)
++  {
++   ipr=tmp_ipr;
++   vecnum=irq==1?((VCRA>>8)&127):irq==2?(VCRA&127):irq==3?((VCRB>>8)&127):(VCRB&127);
++  }
++ }
+ #endif
+  //
+  //
+@@ -3698,6 +3760,11 @@ void SH7095::StateAction(StateMem* sm, const unsigned load, const bool data_only
+ 
+   SFVAR(SCI.RSR),
+   SFVAR(SCI.TSR),
++#ifdef XBAND_MEDNAFEN_LINK_CABLE
++  SFVAR(CableSCI.SMR),SFVAR(CableSCI.BRR),SFVAR(CableSCI.SCR),SFVAR(CableSCI.TDR),
++  SFVAR(CableSCI.SSR),SFVAR(CableSCI.RDR),SFVAR(CableSCI.observed),SFVAR(CableSCI.txValue),
++  SFVAR(CableSCI.txComplete),SFVAR(CableSCI.rxReady),SFVAR(CableSCI.txBusy),
++#endif
+ 
+   SFVAR(ExtHalt),
+   SFVAR(ExtHaltDMA),
+diff --git a/src/ss/ss.cpp b/src/ss/ss.cpp
+index ee01044..a874bee 100644
+--- a/src/ss/ss.cpp
++++ b/src/ss/ss.cpp
+@@ -127,6 +127,8 @@ static uint16 WorkRAML[1024 * 1024 / sizeof(uint16)];
+ static uint16 WorkRAMH[1024 * 1024 / sizeof(uint16)];	// Effectively 32-bit in reality, but 16-bit here because of CPU interpreter design(regarding fastmap).
+ static uint8 BackupRAM[32768];
+ static uint64 XbandCycleBase=0;
++static unsigned CableClockTag=0;
++static bool CablePAL=false;
+ uint64 SS_XbandCycles(){return XbandCycleBase+uint64(std::max<int32>(std::max<int32>(0,CPU[0].timestamp),SH7095_mem_timestamp));}
+ uint32 SS_XbandPeekRAM(uint32 address,unsigned width)
+ {
+@@ -471,6 +473,9 @@ void SS_SetPhysMemMap(uint32 Astart, uint32 Aend, uint16* ptr, uint32 length, bo
+ }
+ 
+ #include "sh7095.inc"
++#ifdef XBAND_MEDNAFEN_LINK_CABLE
++#include "cable_core_test.inc"
++#endif
+ 
+ //
+ // Running is:
+@@ -709,6 +714,10 @@ template<bool EmulateICache, bool DebugMode>
+ static INLINE int32 RunLoop_INLINE(EmulateSpecStruct* espec)
+ {
+  sscpu_timestamp_t eff_ts = 0;
++#ifdef XBAND_MEDNAFEN_LINK_CABLE
++ const bool cable_enabled=xband_cable_enabled();
++ uint64 cable_next_slice=0;
++#endif
+ 
+  for(unsigned c = 0; c < 2; c++)
+   CPU[c].SetDebugMode(DebugMode);
+@@ -731,6 +740,17 @@ static INLINE int32 RunLoop_INLINE(EmulateSpecStruct* espec)
+      DBG_CPUHandler<0>();
+     }
+ 
++#ifdef XBAND_MEDNAFEN_LINK_CABLE
++    // Poll in short slices, including before each progress boundary. Avoid
++    // network-queue locking on every instruction while retaining IRQ delivery.
++    const uint64 cable_now=cable_enabled?SS_XbandCycles():0;
++    if(cable_enabled && cable_now>=cable_next_slice)
++    {
++     CPU[0].CableSCIPoll();CPU[1].CableSCIPoll();
++     const uint64 budget=xband_cable_budget(cable_now,CableClockTag);
++     cable_next_slice=cable_now+std::min<uint64>(64,budget);
++    }
++#endif
+     CPU[0].Step<0, EmulateICache, DebugMode>();
+     CPU[0].DMA_BusTimingKludge();
+ 
+@@ -784,6 +804,7 @@ static NO_INLINE MDFN_COLD int32 RunLoop_Debug(EmulateSpecStruct* espec)
+ // Must not be called within an event or read/write handler.
+ void SS_Reset(bool powering_up)
+ {
++ xband_cable_reset();
+  SH7095_BusLock = 0;
+ 
+  if(powering_up)
+@@ -874,6 +895,7 @@ static void Emulate(EmulateSpecStruct* espec_arg)
+  MDFNGameInfo->mouse_sensitivity = MDFN_GetSettingF("ss.input.mouse_sensitivity");
+ 
+  cur_clock_div = SMPC_StartFrame(espec);
++ CableClockTag=(unsigned(CablePAL)<<1)|unsigned(cur_clock_div==61);
+  UpdateSMPCInput(0);
+  VDP2::StartFrame(espec, cur_clock_div == 61);
+  SOUND_StartFrame(espec->SoundRate / espec->soundmultiplier, MDFN_GetSettingUI("ss.scsp.resamp_quality"));
+@@ -998,6 +1020,7 @@ static void OutputMIDI(uint8 v)
+ 
+ static MDFN_COLD void Cleanup(void)
+ {
++ xband_cable_stop();
+  CART_Kill();
+ 
+  DBG_Kill();
+@@ -1416,6 +1439,7 @@ static void MDFN_COLD InitCommon(unsigned cpucache_emumode, unsigned horrible_ha
+  //
+  //
+  const bool PAL = (smpc_area & SMPC_AREA__PAL_MASK) && (cart_type != CART_STV);
++ CablePAL=PAL;
+  const int32 MasterClock = PAL ? 1734687500 : 1746818182;	// NTSC: 1746818181.8181818181, PAL: 1734687500-ish
+  const char* biospath_sname;
+  int sls = MDFN_GetSettingI(PAL ? "ss.slstartp" : "ss.slstart");
+@@ -1627,6 +1651,11 @@ static void MDFN_COLD InitCommon(unsigned cpucache_emumode, unsigned horrible_ha
+  }
+  //
+  SS_Reset(true);
++ if(!xband_cable_start(cart_type==CART_XBAND_PROBE))throw MDFN_Error(0,"Could not initialize link cable; check launch configuration");
++#ifdef XBAND_MEDNAFEN_LINK_CABLE
++ if(const char* test=getenv("XBAND_MEDNAFEN_CABLE_CORE_TEST"))
++  if(!strcmp(test,"1"))CableCoreSelfTest();
++#endif
+ }
+ 
+ static MDFN_COLD bool TestMagic(GameFile* gf)
+@@ -2218,6 +2247,7 @@ static MDFN_COLD void StateAction(StateMem* sm, const unsigned load, const bool
+    InitEvents();
+   }
+ 
++  xband_cable_reset();
+   CPU[0].PostStateLoad(load, RecordedNeedEmuICache, NeedEmuICache);
+   CPU[1].PostStateLoad(load, RecordedNeedEmuICache, NeedEmuICache);
+  }
+diff --git a/src/ss/ss.h b/src/ss/ss.h
+index 28b66b1..9687a9b 100644
+--- a/src/ss/ss.h
++++ b/src/ss/ss.h
+@@ -25,6 +25,10 @@
+ #include <mednafen/types.h>
+ 
+ #include <trio/trio.h>
++#include "cable_runtime.h"
++#ifdef XBAND_MEDNAFEN_LINK_CABLE
++#include "sci_state.hpp"
++#endif
+ 
+ using namespace Mednafen;
+ 

@@ -180,7 +180,8 @@ struct PB3PairControl {
     std::array<uint64_t,2> elapsed{},grantEnd{},sent{},received{};
     std::array<std::deque<uint8_t>,2> bytes;
     std::array<std::deque<uint8_t>,2> recent; // bounded, in-memory display only
-    void observe(unsigned side,uint8_t b){recent[side].push_back(b);if(recent[side].size()>16)recent[side].pop_front();}
+    std::function<void(unsigned,bool,uint8_t)> communicationByte;
+    void observe(unsigned side,uint8_t b){recent[side].push_back(b);if(recent[side].size()>16)recent[side].pop_front();if(communicationByte)communicationByte(side,false,b);}
 };
 class PB3PairControlEndpoint final:public xband::ServiceEndpoint {
     std::shared_ptr<PB3PairControl> pair;
@@ -311,6 +312,7 @@ public:
                 {"state",e?unsigned(e->state):3},{"game",e?e->game:0}};
         }
         const auto response=responseValue.dump();
+        if(pair->communicationByte)for(auto byte:received)pair->communicationByte(side,true,byte);
         for(unsigned char c:response)output.push_back(c);
     }
     bool peek(uint8_t &b)const override{if(output.empty())return false;b=output.front();return true;}

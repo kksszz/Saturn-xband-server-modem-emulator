@@ -1,0 +1,13 @@
+{
+  "version": "1.32.1",
+  "archive_sha256": "de7eb94ab66212ae7758376524368a8ab208234b33796625ca630547dbc83832",
+  "files": {
+    "src/ss/cart.h": "47f509d43a0c80df1745c9d29d74dd5947fde984bb4aae3d219e2dbf04b25ec0",
+    "src/ss/ss.cpp": "dd15d2789845f52ad6a8f9c73d5a00a1473eb7b88724b3f873d29e6066169256",
+    "src/ss/scu.inc": "8dfbaf244cafc9737843bb5a05435a8292635e135252196799cf29bc0f4f9ed9",
+    "src/ss/cart.cpp": "72ad0fca46acca16221a5c4335b43fc4cdc9a05c1cbfeec9ed67ebf47120ae61",
+    "src/ss/ss.h": "0aab59d3a1c44141a453f85e1833e4925509c4ed0162ea14d6c9690a07264fa6",
+    "src/drivers/main.cpp": "08dca8eba533daae7a67fb1b49b83dcb7e0b215e9411f30eac9860c32591b8e0",
+    "src/ss/smpc.cpp": "79ff38d8450494dfd4cbfc40eded6cf5515c18c28e549963e8da92c6c2e0a306"
+  }
+}
