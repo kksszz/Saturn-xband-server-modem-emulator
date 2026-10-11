@@ -17,6 +17,7 @@
 *.bmp
 *.png
 !docs/images/vf-remix-xband-mednafen.png
+!docs/images/xband-server-ui.png
 *.jpg
 mail-journal/
 activity-history/
