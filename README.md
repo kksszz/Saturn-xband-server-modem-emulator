@@ -102,6 +102,7 @@ ctest --test-dir build -C Release --output-on-failure
 
 - 実サターンメディアカードの読み書き機能の実装。
 - 別PC間での動作試験。
+- 3台以上のモデムセッションのサポート。
 
 ## 権利・依存関係
 
