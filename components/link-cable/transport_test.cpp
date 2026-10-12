@@ -1,4 +1,5 @@
 #include "link_cable_service.hpp"
+#include "cable_timebase.hpp"
 #include <future>
 #include <iostream>
 #include <stdexcept>
@@ -30,6 +31,24 @@ static void run(){
     check(fa.get()==4096&&fb.get()==4096,"barrier budget");
     std::optional<saturn::link::uint8> v;until([&]{v=b.ReceiveSCI(true,5006);return v.has_value();});check(*v==77,"timed delivery");
     a.AdvanceSynchronized(4196,2,1,[]{return false;});check(a.GetState()==LinkCableService::State::Error,"revision invalidates");
+    a.Disconnect();b.Disconnect();
+    // Normal CPU-divider switches must not invalidate the fixed-rate cable
+    // timeline or lose initialization bytes. Different CPU rates, same video.
+    saturn::link::CableTimebase ca,cb;
+    a.Listen(59379);b.Connect("127.0.0.1",59379);
+    until([&]{return a.GetState()==LinkCableService::State::Connected&&b.GetState()==LinkCableService::State::Connected;});
+    check(a.AdvanceSynchronized(0,1,0x100,[]{return false;})==4096,"normalized origin A");
+    check(b.AdvanceSynchronized(0,1,0x100,[]{return false;})==4096,"normalized origin B");
+    a.TransmitSCI(true,0x31,100);b.TransmitSCI(false,0x32,100);
+    ca.endFrame(6500,61);cb.endFrame(6100,65);
+    check(ca.sample(0,65)==cb.sample(0,61),"equal physical elapsed time at different CPU clocks");
+    auto ta=std::async(std::launch::async,[&]{return a.AdvanceSynchronized(ca.sample(0,65),1,0x100,[]{return false;});});
+    auto tb=std::async(std::launch::async,[&]{return b.AdvanceSynchronized(cb.sample(0,61),1,0x100,[]{return false;});});
+    check(ta.get()==2092&&tb.get()==2092,"normal CPU switch preserves progress");
+    until([&]{v=b.ReceiveSCI(true,6100);return v.has_value();});check(*v==0x31,"initial master byte preserved");
+    until([&]{v=a.ReceiveSCI(false,6100);return v.has_value();});check(*v==0x32,"initial slave byte preserved");
+    a.AdvanceSynchronized(6100,1,0x102,[]{return false;});
+    check(a.GetState()==LinkCableService::State::Error,"video-rate mismatch still invalidates");
     a.Disconnect();b.Disconnect();
     std::cout<<"4000 lane bytes, independent origins, barrier, latency and reset passed\n";
 }

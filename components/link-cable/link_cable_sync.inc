@@ -132,6 +132,12 @@ void LinkCableService::TransmitSCI(bool master, uint8 value, uint64 cycle) {
 
 std::optional<uint8> LinkCableService::ReceiveSCI(bool master, uint64 cycle) {
     if (!m_dualSCI) return ReceiveTimed(cycle);
+    // The worker publishes the front deadline before publishing queue size.
+    // Empty/future owner polls need no shared mutex; revalidate under the lock.
+    if (!m_rxCount.load(std::memory_order_acquire)) return {};
+    const auto due = (master ? m_masterDue : m_slaveDue).load(std::memory_order_acquire);
+    if (due == ~uint64{0} ||
+        (m_synchronized && (cycle < m_syncOrigin || cycle - m_syncOrigin < due))) return {};
     std::lock_guard lock{m_syncMutex};
     auto &queue = master ? m_masterRX : m_syncRX;
     if (GetState() != State::Connected || m_stop.load() || m_syncFault.load() || queue.empty()) return {};
@@ -139,6 +145,8 @@ std::optional<uint8> LinkCableService::ReceiveSCI(bool master, uint64 cycle) {
         cycle - m_syncOrigin < queue.front().cycle + kSyncQuantum)) return {};
     const uint8 value = queue.front().value;
     queue.pop_front();
+    (master ? m_masterDue : m_slaveDue).store(queue.empty() ? ~uint64{0} :
+        queue.front().cycle + (m_synchronized ? kSyncQuantum : 0), std::memory_order_release);
     m_rxCount.store(m_syncRX.size() + m_masterRX.size());
     if constexpr (kDiagnostics) m_lastActiveMaster.store(master);
     ++m_delivered;
@@ -192,7 +200,10 @@ bool LinkCableService::ParseSyncMessage(const SyncMessage &message) {
             SyncError("Invalid synchronized link byte order/range or receive queue overflow"); return false;
         }
         lastByte = cycle;
+        const bool empty = queue.empty();
         queue.push_back({cycle, uint8(value)});
+        if (empty) (type == kMasterByte ? m_masterDue : m_slaveDue).store(
+            cycle + (m_synchronized ? kSyncQuantum : 0), std::memory_order_release);
         m_rxCount.store(m_syncRX.size() + m_masterRX.size());
         RecordMaximum(m_peakRxCount, m_syncRX.size() + m_masterRX.size());
         ++m_received;
@@ -219,11 +230,13 @@ void LinkCableService::RunSynchronizedSession(uintptr_t handle) {
     {
         std::lock_guard lock{m_syncMutex};
         m_syncTX.clear(); m_syncRX.clear(); m_masterRX.clear(); m_rxCount.store(0);
+        m_slaveDue.store(~uint64{0}); m_masterDue.store(~uint64{0});
         m_lastMasterByte = 0;
         m_syncPeerProgress = m_syncLastPeerByte = 0;
         m_syncPeerClock = 0;
         m_syncHello = false;
         ++m_syncGeneration;
+        m_sessionEpoch.store(m_syncGeneration, std::memory_order_release);
         m_syncFault.store(false);
         QueueSyncMessage(kHello, kSyncQuantum, m_dualSCI ? (m_synchronized ? 3 : 2) : uint64(m_masterSCI));
     }

@@ -1,4 +1,4 @@
-param([string]$Version='v0.5.0',[string]$OutputDirectory='artifacts',[string]$PackageRevision)
+param([string]$Version='v0.5.1',[string]$OutputDirectory='artifacts',[string]$PackageRevision)
 $ErrorActionPreference='Stop'
 if($Version -notmatch '^v\d+\.\d+\.\d+([.-][a-zA-Z0-9.-]+)?$'){throw 'Invalid release version'}
 if($PackageRevision -and $PackageRevision -notmatch '^\d{4}-\d{2}-\d{2}$'){throw 'Invalid package revision'}

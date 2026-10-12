@@ -1,7 +1,7 @@
-# v0.5.0 パッケージ案内
+# v0.5.1 パッケージ案内
 
-2026-10-12更新。Windows x64の公開開発版（Public prerelease）v0.5.0の差し替え版です。
-配布先は[GitHub v0.5.0](https://github.com/kksszz/Saturn-xband-server-modem-emulator/releases/tag/v0.5.0)です。
+2026-10-13。Windows x64の公開開発版（Public prerelease）v0.5.1です。
+配布先は[GitHub v0.5.1](https://github.com/kksszz/Saturn-xband-server-modem-emulator/releases/tag/v0.5.1)です。
 XBANDとシリアル対戦の両方を含むソース統合キットで、追加DLLを置くだけのプラグインではありません。
 
 | 内容 | 場所／入口 |
@@ -37,4 +37,6 @@ ZIPにはサーバーを再ビルドするためのソース・CMake・回帰試
 2026-10-12版にはservice endpoint整理、peer endpoint指定、Subscriber制約整理、
 全10タイトルのID根拠・正式表示名、更新した仕様書・ガイド・今後の開発検討事項を収録します。
 「3台以上のモデムセッション」は検討事項であり、現在の対応は2台です。
-`verify-package.ps1 -Archive <ZIP> -ExpectedVersion v0.5.0`で収録境界とハッシュを再検査できます。
+`verify-package.ps1 -Archive <ZIP> -ExpectedVersion v0.5.1`で収録境界とハッシュを再検査できます。
+
+v0.5.1には[Mednafen通信最適化](integration/mednafen/LINK-OPTIMIZATION-VERIFICATION.md)と[PS1/SS統合引き継ぎ](integration/mednafen/PS1-SS-HANDOFF.md)を収録します。Mednafenフルパッケージは本ZIPとは別の配布です。

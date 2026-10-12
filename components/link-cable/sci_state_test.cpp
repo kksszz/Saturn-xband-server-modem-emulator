@@ -1,9 +1,34 @@
 #include "sci_state.hpp"
+#include "cable_timebase.hpp"
 #include <deque>
 #include <stdexcept>
 #include <iostream>
 static void check(bool ok){if(!ok)throw std::runtime_error("SCI contract failed");}
 int main(){
+    saturn::link::CableTimebase normal,fast,mixed;
+    normal.endFrame(6100,65);fast.endFrame(6500,61);
+    check(normal.sample(0,65)==6100&&fast.sample(0,65)==6100);
+    mixed.endFrame(100,65);check(mixed.sample(0,61)==100);
+    mixed.endFrame(6500,61);check(mixed.sample(0,65)==6200);
+    check(mixed.sample(100,65)==6300);
+    saturn::link::CableTimebase fraction;
+    for(unsigned i=0;i<65;++i)fraction.endFrame(1,61);
+    check(fraction.sample(0,65)==61); // No rounding loss on frame rebases.
+    for(unsigned startDivider:{61u,65u}){
+        saturn::link::CableTimebase gated;
+        unsigned divider=startDivider,samples=0;
+        std::uint64_t nextRaw=0,boundary=4096,frameStart=0;
+        for(std::uint64_t raw=0;raw<=20000;++raw){
+            if(raw==8192){gated.endFrame(raw-frameStart,divider);frameStart=raw;divider=divider==61?65:61;}
+            if(raw<nextRaw)continue;
+            const auto time=gated.sample(raw-frameStart,divider);++samples;
+            check(time<=boundary); // Poll never crosses a synchronization grant.
+            if(time==boundary)boundary+=4096;
+            const auto budget=boundary-time;
+            nextRaw=raw+(budget<64?budget:64);
+        }
+        check(samples<400); // No fixed-clock conversion per guest instruction.
+    }
     using saturn::link::SciState;
     SciState s;std::deque<int> tx,rx;
     const auto send=[&](unsigned b,std::uint64_t){tx.push_back(b);};

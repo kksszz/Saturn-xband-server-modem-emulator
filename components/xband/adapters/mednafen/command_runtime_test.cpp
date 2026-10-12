@@ -1,6 +1,8 @@
 #include "command_runtime.h"
 #include "card_runtime.h"
+#include "peer_poll_schedule.hpp"
 #include <xband/windows_tcp_host.hpp>
+#include <mmsystem.h>
 #include "pb3_pair_control.hpp"
 #include <cstdlib>
 #include <deque>
@@ -48,6 +50,15 @@ struct GatedEcho: Echo {
 static void feed(XbandCommandRuntime* r,const std::string& s){for(unsigned char c:s)xband_command_feed(r,c);}
 static std::string drain(XbandCommandRuntime* r){std::string s;for(int c;(c=xband_command_pop(r))>=0;)s+=char(c);return s;}
 int main(){
+ struct TimerPeriod {TimerPeriod(){timeBeginPeriod(1);}~TimerPeriod(){timeEndPeriod(1);}} timerPeriod;
+ xband::mednafen::PeerPollSchedule pace;
+ check(pace.admit(100,100));check(!pace.admit(100,101));
+ check(!pace.admit(4196,100));check(pace.admit(8292,101));
+ check(!pace.admit(12388,101));pace.reset();check(pace.admit(0,0));
+ check(pace.controlDelay(true)==1&&pace.controlDelay(false)==16);
+#ifndef XBAND_MEDNAFEN_LEGACY_PUMP
+ check(xband_command_live_poll(nullptr)==0);
+#endif
  auto* r=xband_command_create(log,clear);check(r!=nullptr);
  feed(r,"AT");check(drain(r).empty());feed(r,"\r");check(drain(r)=="\r\nOK\r\n");
  feed(r,"atz0\r");check(drain(r)=="\r\nOK\r\n");
@@ -236,6 +247,49 @@ int main(){
  std::string binaryReceived;
  pumpPeers([&]{binaryReceived+=drain(peers[1]);return binaryReceived.size()>=binary.size();});
  check(binaryReceived==binary);check(drain(peers[0]).empty());
+ // Cart-event-style owner pumping between frame boundaries. No additional
+ // guest frames, synthetic UART bursts or overlapping/replayed exchanges.
+ auto lastHostPump=GetTickCount64();
+ unsigned livePumps=0;
+ auto pumpLivePeers=[&](auto done){
+   const auto deadline=GetTickCount64()+5000;
+   while(!done()){
+     const auto now=GetTickCount64();check(now<deadline);
+     check(peerControl0.step(now));check(peerControl1.step(now));
+     check(peerService0.step(now));check(peerService1.step(now));
+     cycle0+=5000;cycle1+=7000;
+     xband_command_clock(peers[0],cycle0,0);xband_command_clock(peers[1],cycle1,0);
+#ifndef XBAND_MEDNAFEN_LEGACY_PUMP
+     for(auto* terminal:peers){
+       livePumps+=xband_command_live_poll(terminal);
+       check(xband_command_live_poll(terminal)==0); // Same guest cycle is paced.
+     }
+#endif
+     if(now-lastHostPump>=16){
+       lastHostPump=now;
+       for(auto* terminal:peers){xband_command_poll(terminal);xband_command_frame(terminal);}
+     }
+     for(auto* terminal:peers)check(!xband_command_failed(terminal)&&xband_command_peer(terminal));
+     Sleep(1);
+   }
+ };
+ std::vector<uint64_t> roundTrips;
+ for(unsigned i=0;i<16;++i){
+   const std::string sent(1,char(0x80+i));std::string forward,back;
+   const auto start=std::chrono::steady_clock::now();feed(peers[0],sent);
+   pumpLivePeers([&]{forward+=drain(peers[1]);return !forward.empty();});check(forward==sent);
+   feed(peers[1],forward);
+   pumpLivePeers([&]{back+=drain(peers[0]);return !back.empty();});check(back==sent);
+   roundTrips.push_back(std::chrono::duration_cast<std::chrono::microseconds>(
+     std::chrono::steady_clock::now()-start).count());
+ }
+#ifndef XBAND_MEDNAFEN_LEGACY_PUMP
+ check(livePumps>0);
+#endif
+ std::sort(roundTrips.begin(),roundTrips.end());
+ std::cout<<"XBAND_LATENCY samples=16 median_ms="<<(roundTrips[7]+roundTrips[8])/2000.0
+          <<" min_ms="<<roundTrips.front()/1000.0<<" max_ms="<<roundTrips.back()/1000.0<<" live_pumps="<<livePumps<<'\n';
+ xband_command_uart_activity(peers[1],0); // Begin a fresh FIFO timeout observation.
  check(xband_command_interrupt(peers[1],1,0xC1,1)==1);
  cycle1+=75001;xband_command_clock(peers[1],cycle1,1);
  check(xband_command_interrupt(peers[1],1,0xC1,1)==12);

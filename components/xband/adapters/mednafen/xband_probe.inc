@@ -35,6 +35,7 @@ static void XbandClock()
 static sscpu_timestamp_t XbandUpdate(sscpu_timestamp_t timestamp)
 {
  XbandClock();
+ if(xband_command_live_poll(XbandCommands))XbandClock();
  return xband_command_peer(XbandCommands)?timestamp+256:SS_EVENT_DISABLED_TS;
 }
 extern "C" void xband_mednafen_host_poll(void)

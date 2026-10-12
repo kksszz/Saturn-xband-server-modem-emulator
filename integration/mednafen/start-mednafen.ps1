@@ -25,7 +25,7 @@ $taskSaved=@{}
 try {
     foreach($taskKey in $taskValues.Keys){$taskSaved[$taskKey]=[Environment]::GetEnvironmentVariable($taskKey,'Process');[Environment]::SetEnvironmentVariable($taskKey,$taskValues[$taskKey],'Process')}
     # Interactive game window is intentional; users perform game operations.
-    $taskArguments=@('-ss.cart','xband-probe','-ss.bios_jp',('"'+$taskBios+'"'),('"'+$taskDisc+'"'))
+    $taskArguments=@('-ss.cart','xband-probe','-ss.bios_jp',('"'+$taskBios+'"'),'-sound','1',('"'+$taskDisc+'"'))
     $taskProcess=Start-Process -FilePath $taskExe -ArgumentList $taskArguments -WorkingDirectory (Split-Path $taskExe) -PassThru
     Write-Output ('Mednafen started; PID '+$taskProcess.Id+'; side '+$Side+'; profile '+$taskProfile)
 } finally {

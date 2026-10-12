@@ -1,4 +1,4 @@
-param([Parameter(Mandatory=$true)][string]$Archive,[string]$ExpectedVersion='v0.5.0')
+param([Parameter(Mandatory=$true)][string]$Archive,[string]$ExpectedVersion='v0.5.1')
 $ErrorActionPreference='Stop'
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $taskZip=[IO.Compression.ZipFile]::OpenRead((Resolve-Path -LiteralPath $Archive).Path)
@@ -39,6 +39,11 @@ try {
     }
     foreach($taskRequired in @('bin/xband-server.exe','CMakeLists.txt','LICENSE','PACKAGE-CONTENTS.md','components/xband/CMakeLists.txt','components/xband/include/xband/modem_register_bank.hpp','components/xband/adapters/ymir/frontend_modem.cpp','components/xband/adapters/mednafen/command_runtime.cpp','components/xband/adapters/mednafen/cable_runtime.cpp','components/xband/adapters/mednafen/cable_core_test.inc','components/link-cable/CMakeLists.txt','components/link-cable/sci_state.hpp','components/link-cable/link_cable_service.cpp','components/link-cable/link_cable_sync.inc','outputs/live-capture-tests/pb3_service_server.cpp','docs/SERVER-MODEM-SPEC.md','docs/BATTLE-CABLE-SERIAL-SPEC.md','docs/YMIR-INTEGRATION-MANUAL.md','docs/MEDNAFEN-INTEGRATION-MANUAL.md','docs/EMULATOR-INTEGRATION-SPEC.md','integration/ymir/ymir-9a237ea-serial-xband.patch','integration/mednafen/mednafen-1.32.1-xband.patch','integration/mednafen/mednafen-1.32.1-link-cable.patch','integration/mednafen/start-link-cable.ps1','integration/mednafen/LINK-CABLE.md')){
         if(-not $taskNames.ContainsKey($taskRequired)){throw ('Required release input missing: '+$taskRequired)}
+    }
+    if($ExpectedVersion -eq 'v0.5.1'){
+        foreach($taskRequired in @('components/link-cable/cable_timebase.hpp','components/link-cable/local_sci_cable.hpp','components/link-cable/local_sci_test.cpp','components/xband/adapters/mednafen/peer_poll_schedule.hpp','integration/mednafen/LINK-OPTIMIZATION-VERIFICATION.md','integration/mednafen/PS1-SS-HANDOFF.md')){
+            if(-not $taskNames.ContainsKey($taskRequired)){throw ('Optimization input missing: '+$taskRequired)}
+        }
     }
     if($taskManifest.package_revision){
         if(-not $taskManifest.source_commit){throw 'Revision package missing source commit'}

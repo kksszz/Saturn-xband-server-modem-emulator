@@ -4,9 +4,14 @@ param(
     [Parameter(Mandatory=$true)][string]$JapaneseBios,
     [Parameter(Mandatory=$true)][string]$ProfileDirectory,
     [ValidateRange(1024,65535)][int]$Port=32458,
-    [ValidateSet(0,1)][int]$Synchronize=1
+    [ValidateSet(0,1)][int]$Synchronize=1,
+    [ValidateSet('tcp','shared')][string]$Backend='tcp',
+    [ValidateSet(64,128,256,512,1024,2048,4096)][int]$Quantum=4096,
+    [ValidateSet(0,1)][int]$Sound=1
 )
 $ErrorActionPreference='Stop'
+if($Backend -eq 'tcp' -and $Quantum -ne 4096){throw 'TCP requires Quantum=4096. Select shared for adjustable latency.'}
+if($Backend -eq 'shared' -and $Synchronize -ne 1){throw 'Shared SCI requires Synchronize=1.'}
 $taskExe=(Resolve-Path -LiteralPath $Executable).Path
 $taskDisc=(Resolve-Path -LiteralPath $Disc).Path
 $taskBios=(Resolve-Path -LiteralPath $JapaneseBios).Path
@@ -17,6 +22,8 @@ $taskValues=@{
     XBAND_MEDNAFEN_CABLE='1'
     XBAND_MEDNAFEN_CABLE_PORT=[string]$Port
     XBAND_MEDNAFEN_CABLE_SYNC=[string]$Synchronize
+    XBAND_MEDNAFEN_CABLE_BACKEND=$Backend
+    XBAND_MEDNAFEN_CABLE_QUANTUM=[string]$Quantum
     XBAND_MEDNAFEN_SERVICE_PORT=$null
     XBAND_MEDNAFEN_SUBSCRIBER=$null
     XBAND_MEDNAFEN_CARD=$null
@@ -28,7 +35,7 @@ try{
         [Environment]::SetEnvironmentVariable($taskKey,$taskValues[$taskKey],'Process')
     }
     # Interactive game window intentionally requested by the launcher.
-    $taskArguments=@('-ss.cart','auto','-ss.bios_jp',('"'+$taskBios+'"'),('"'+$taskDisc+'"'))
+    $taskArguments=@('-ss.cart','auto','-ss.bios_jp',('"'+$taskBios+'"'),'-sound',[string]$Sound,('"'+$taskDisc+'"'))
     $taskProcess=Start-Process -FilePath $taskExe -ArgumentList $taskArguments -WorkingDirectory (Split-Path $taskExe) -WindowStyle Hidden -PassThru
     Write-Output ('Link-cable Mednafen started; PID '+$taskProcess.Id+'; profile '+$taskProfile)
 }finally{

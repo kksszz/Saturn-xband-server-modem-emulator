@@ -38,6 +38,9 @@ void xband_command_observe_uart_write(XbandCommandRuntime* runtime,unsigned reg,
 void xband_command_observe_wait(XbandCommandRuntime* runtime,uint32_t clock,uint32_t start,
     uint32_t duration,int active,int monitor,int verified);
 void xband_command_poll(XbandCommandRuntime* runtime);
+/* Bounded sub-frame pump from the cart event only, not mapped bus callbacks.
+   Returns 1 if one pump was performed. Idle/service traffic uses host poll. */
+int xband_command_live_poll(XbandCommandRuntime* runtime);
 void xband_command_frame(XbandCommandRuntime* runtime);
 int xband_command_carrier(const XbandCommandRuntime* runtime);
 /* Host adapter entry point, called only by the Mednafen game owner thread. */

@@ -17,6 +17,10 @@
 
 ## バージョンごとの主な内容
 
+### v0.5.1：XBAND・対戦ケーブルの通信処理最適化
+
+[公開開発版v0.5.1](https://github.com/kksszz/Saturn-xband-server-modem-emulator/releases/tag/v0.5.1)では、MednafenのXBAND通信ポーリング、SCI受信・同期予算、同期ONの初期化を改善し、同一PC用の共有メモリー接続を追加しました。[収録案内](PACKAGE-CONTENTS.md)と[最適化検証記録](integration/mednafen/LINK-OPTIMIZATION-VERIFICATION.md)を参照してください。エミュレーター本体は含みません。
+
 ### v0.5.0：2つのWindows サターンエミュレーター向け統合パッケージ
 
 最新XBAND・対戦ケーブル対戦、YMIR／Mednafen組み込み用ソース・差分・各ガイド・仕様書をまとめた[公開開発版v0.5.0](https://github.com/kksszz/Saturn-xband-server-modem-emulator/releases/tag/v0.5.0)です。[収録内容と入口](PACKAGE-CONTENTS.md)と[検証記録](docs/RELEASE-VERIFICATION.md)を参照してください。ZIPにはサーバー再ビルド用ソースと回帰試験も含みます。旧v0.4.0は上書きしません。

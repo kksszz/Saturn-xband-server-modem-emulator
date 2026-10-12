@@ -118,6 +118,9 @@ public:
     State GetState() const {
         return m_state.load(std::memory_order_acquire);
     }
+    // Invalidate owner-thread budget caches even if a reconnect's intermediate
+    // states were not sampled. This does not change the YLS1 wire protocol.
+    uint64 SessionEpoch() const { return m_sessionEpoch.load(std::memory_order_acquire); }
     std::string GetError() const;
     std::vector<std::string> TakeNotifications();
     Diagnostics GetDiagnostics() const;
@@ -174,6 +177,8 @@ private:
     struct TimedByte { uint64 cycle; uint8 value; };
     std::deque<TimedByte> m_syncRX;
     std::deque<TimedByte> m_masterRX;
+    std::atomic<uint64> m_slaveDue{~uint64{0}}, m_masterDue{~uint64{0}};
+    std::atomic<uint64> m_sessionEpoch{0};
     uint64 m_lastMasterByte = 0;
     uint64 m_syncGeneration = 0, m_syncPeerProgress = 0, m_syncLastPeerByte = 0;
     uint32 m_syncPeerClock = 0;

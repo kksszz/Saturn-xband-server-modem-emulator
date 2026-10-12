@@ -1,8 +1,10 @@
 # Saturn対戦ケーブルのシリアル通信エミュレート仕様（YMIR／Mednafen）
 
-仕様書 第2版　2026年10月11日（配布更新注記：2026年10月12日）
+仕様書 第4版　2026年10月13日（v0.5.1の最適化と初期化修正）
 
-本書はv0.5.0のYMIR／Mednafen両方の対戦ケーブル機能を対象とする。SCI・YLS1・実行同期の共通仕様と、ホストごとの結線・設定・停止／復帰方法を区別して記載する。TCP部品はYMIR実装から`components/link-cable`へ抽出した。既存YMIR差分は維持し、Mednafenは共通部品と専用アダプターを利用する。
+本書はv0.5.1のYMIR／Mednafen両方の対戦ケーブル機能を対象とする。SCI・YLS1・実行同期の共通仕様と、ホストごとの結線・設定・停止／復帰方法を区別して記載する。TCP部品はYMIR実装から`components/link-cable`へ抽出した。既存YMIR差分は維持し、Mednafenは共通部品と専用アダプターを利用する。
+
+Mednafenの共有メモリー方式・予算キャッシュ・固定通信時計はv0.5.1に収録する。ランチャーの既定は従来のTCP／4096を維持し、同一PCの実ゲーム試験では共有方式／4096／同期ONを使用した。XBAND経路も別途ポーリングを最適化したが、共有SCI方式はXBANDへ適用しない。
 
 標準の試験構成は同一PC上で同じエミュレーターの独立2プロセスを直接TCP接続する。YMIRにはLANホスト／クライアント設定もあるが、Mednafenの追加ランチャーは同一PC用である。別PC間のLAN接続は将来の検討事項で、異種エミュレーター間の実ゲーム対戦も未検証である。両者のYLS1形式が一致することだけを、実ゲーム互換性の確認とはしない。
 
@@ -34,7 +36,7 @@ YMIRではモデム接続操作が対戦ケーブルを切断し、両者が接�
 
 ## 2 構成とCPUの経路
 
-両ホストとも`SetDualSCI(true)`を設定し、マスターSH-2とスレーブSH-2の送受信を独立した経路へ結線する。YMIRはCPUのコールバック、Mednafenは`CableSCIPoll()`からC ABIの送受信関数を呼ぶ。
+TCPでは両ホストとも`SetDualSCI(true)`を設定し、マスターSH-2とスレーブSH-2の送受信を独立した経路へ結線する。共有方式も同じ2経路を保持する。YMIRはCPUのコールバック、Mednafenは`CableSCIPoll()`からC ABIの送受信関数を呼ぶ。
 
 ```text
 端末A マスターSCI → マスター用レコード → 端末B マスター受信キュー → マスターSCI
@@ -147,10 +149,16 @@ Serial Port設定UIのモードは次のとおり。
 | --- | --- | --- |
 | `-Port` | 32458、1024～65535 | `XBAND_MEDNAFEN_CABLE_PORT` |
 | `-Synchronize` | 1、0または1 | `XBAND_MEDNAFEN_CABLE_SYNC` |
+| `-Backend` | `tcp`。`tcp`／`shared` | `XBAND_MEDNAFEN_CABLE_BACKEND` |
+| `-Quantum` | 4096。共有方式では64／128／256／512／1024／2048／4096 | `XBAND_MEDNAFEN_CABLE_QUANTUM` |
 | `-ProfileDirectory` | 必須。左右で別フォルダー | `MEDNAFEN_HOME` |
 | 専用起動で自動設定 | ケーブルON | `XBAND_MEDNAFEN_CABLE=1` |
 
 ほかに`-Executable`、`-Disc`、`-JapaneseBios`を指定する。先に起動した側が待ち受け、後から起動した側が同じポートへ接続する。パラメーター変更時は両側を閉じ、同じポート・同期設定で再起動する。専用ランチャーはホストアドレスやLANモードを公開していない。共通TCP部品のAPIにLAN機能があることを、Mednafenランチャーの対応機能とはしない。
+
+共有方式では`-Port`をペアのチャンネル番号に使用し、TCPソケットを開かない。
+両側のBackend／チャンネル／Quantumを一致させる。共有方式は同期ONのみ、TCP方式は
+Quantum=4096のみを受け付ける。異なる方式同士は接続できない。
 
 両ホストとも、ここでの「実行同期」はSMRで指定するSCI自体の同期通信モードとは別である。設定例とビルド手順は各組み込みガイドを参照する。
 
@@ -196,7 +204,7 @@ HELLO/PROGRESSやヘッダーのバイトをゲストRDRへ渡さない。BYTE/M
 
 旧分岐として、dual-SCIも実行同期も無効の場合に限りヘッダーなしの生バイトTCPを扱う。現行標準モードと自動交渉する形式ではなく、混在は非互換である。
 
-## 8 実行同期と仮想遅延
+## 8 TCPの実行同期と仮想遅延
 
 同期ONは、ホストの実時間ではなくエミュレーションのサイクル数で両側の進行を制御する。量子Qは4096。接続後の最初の実行予算呼び出しで各側のoriginを記録し、送信cycleを現在サイクル－originにする。両プロセスの累積サイクル数が同じ値である必要はない。
 
@@ -209,11 +217,42 @@ HELLO/PROGRESSやヘッダーのバイトをゲストRDRへ渡さない。BYTE/M
 
 境界待ちは条件変数を1ms単位で確認し、ホストが渡すキャンセル判定で実行予算0を返す。YMIRはUIイベント等を処理するために実行をいったん中断できる。Mednafenはゲームスレッド終了を検出し、同期待機をキャンセルして終了へ進む。データがないからゲストへ架空のバイトを返すことはしない。
 
-PROGRESSのclockTagが両側で一致しなければエラーにする。YMIRは`(VideoStandard << 1) | ClockSpeed`を使用し、SH-2クロック倍率が`Ratio::One()`でない場合も同期を中止する。Mednafenは`(CablePAL << 1) | (cur_clock_div == 61)`を使用する。両側の映像方式・CPUクロック条件を一致させ、ホスト別の値の作り方と実ゲーム互換性を区別する。
+PROGRESSのclockTagが両側で一致しなければエラーにする。YMIRは`(VideoStandard << 1) | ClockSpeed`を使用し、SH-2クロック倍率が`Ratio::One()`でない場合も同期を中止する。Mednafenの初期化修正版は`0x100 | (CablePAL << 1)`を使用する。0x100は基準tick方式を区別する印で、旧Mednafen／YMIRのCPUサイクル方式との同期接続は不一致として扱う。
+
+MednafenではSCI自体の時計と交通制御の時計を分離する。SCIのレジスタ・シフト・DMA・IRQは従来の累積SH-2サイクルを使う。交通制御は各フレームのSH-2サイクル×CPU分周値（61または65）をマスタークロック単位で累積し、65で割った基準tickを使う。端数はフレームごとに捨てず保持する。送信時刻、受信照会時刻、同期予算に同じ基準tickを使い、通常のCPU速度切替で再接続・キュー破棄をしない。Q=4096や追加遅延もこの基準tick単位となる。両側の映像方式・時計方式を一致させ、実ゲーム互換性とは区別する。
 
 時間軸revisionの変化、originより前への巻き戻し、clockTagの変更、同期境界から1量子以上の実行超過もエラー条件。YMIRはSaturnのResetと成功したLoadStateでrevisionを更新する。MednafenはC ABIランタイムのrevisionを使用し、ハードリセット／状態ロード時に明示的に切断する。同期ONの接続を、復元したCPU状態へそのまま持ち越さない。Mednafenの64サイクルpollは実行目安であり、命令やDMAのまとまった実行による境界超過は試験項目として残る。
 
 HELLO後に相手のPROGRESSが止まった場合、別の固定秒数による同期待ちタイムアウトは設けていない。TCPが切れず相手が一時停止している間は、進行待ちが続く。停止した相手が必ず自動でエラーになる仕様ではない。
+
+### 8.1 Mednafenの共有メモリー方式（開発版）
+
+同じWindowsログオンセッションの2プロセス専用。名前付きマッピング
+`Local\\SaturnSCI_v1_<channel>`と初期化用mutexを使う。PS1のIPC名前空間とは別で、
+マスター／スレーブSH-2の2経路を維持する。通信構造は内部ABIでありYLS1レコードではない。
+各送信側に4096件のリングを持ち、16バイトのメッセージに相対サイクル・1バイトの値・
+CPU経路を記録する。Windows Interlocked操作で公開／消費位置を更新する。
+
+開始時にPIDとセッショントークンを記録し、稼働中の枠を第3プロセスが奪うことはない。
+相手が終了・差し替え・リセットされたセッションのデータは使用しない。独立したorigin、
+clockTag、revisionを検査する。実行境界と受信可能時刻はTCPと同じ考え方で、
+`localRelativeCycle >= remoteByteCycle + Q`とするが、Qは選択値になる。
+128を選ぶと追加仮想遅延は4096の1/32になる。SCIフレーム時間・DMA・IRQは変更しない。
+
+共有方式はエミュレーション所有スレッドから直接アクセスし、ソケットワーカーを使わない。
+境界ではspin／yieldで相手の進行を待ち、終了要求・相手の異常・プロセス終了を検査する。
+進行待ちが30秒を超えるとエラーにする。小さなQは待機頻度やCPU負荷を増やし得るため、
+実ゲーム試験を経て選択する。片側の一時停止は相手の進行も止める。
+
+### 8.2 Mednafenの予算キャッシュとTCP受信の軽量化（開発版）
+
+同じ同期境界内ではC ABI側で残りの予算を計算する。接続状態・セッション世代・revision・
+clockTag・サイクルの単調性を確認し、境界到達や状態変更時は交通制御側へ再照会する。
+終了判定はキャッシュ中も毎回行う。共有方式／TCP方式の両方に適用する。
+
+共通TCPのSCI受信は、キューが空、または対象CPUの先頭データの到着時刻より前なら、
+atomicな公開状態だけで「データなし」を返す。実際の取り出しは従来通りロック内で再検査する。
+YLS1形式・4096の同期量子・データ順序・キュー上限は変更しない。
 
 ## 9 キュー容量と異常処理
 
@@ -223,6 +262,8 @@ HELLO後に相手のPROGRESSが止まった場合、別の固定秒数による�
 | YLS1送信 | 65536レコード。制御レコードも含む。24バイト×件数でデータバイト上限とは別 |
 | YLS1送受信バッチ | 最大64レコード、1536バイト単位で処理 |
 | 旧生バイト分岐 | 送受信それぞれ65536バイト。バッチ最大256バイト |
+| 共有方式の送信リング | 各方向4096メッセージ。満杯はエラーにし、黙って破棄しない |
+| 共有方式の所有スレッド受信キュー | 両CPU合計65536データバイト。超過はエラー |
 
 不正magic、HELLO不一致、未知のtype、255を超えるデータ、同期OFFで0以外のcycleはエラーにする。同期ONではCPU経路別に送信cycleの逆行を禁止し、peerProgressより前、またはpeerProgress＋2Qを超えるデータも拒否する。PROGRESSは直前からQずつ増えることを要求する。
 
@@ -232,14 +273,14 @@ HELLO後に相手のPROGRESSが止まった場合、別の固定秒数による�
 
 ## 10 保存状態とデバッグ
 
-両ホストの保存対象は各CPUのSMR、BRR、SCR、TDR、SSR、RDR、観測済みフラグ、送信中の値と完了サイクル、送信busy、受信可能サイクル。YMIRは既存のSH-2保存構造へ、MednafenはSH7095のStateActionへ追加する。TCPソケット、ワーカースレッド、サービスのネットワークキューは保存状態へシリアライズしない。
+両ホストの保存対象は各CPUのSMR、BRR、SCR、TDR、SSR、RDR、観測済みフラグ、送信中の値と完了サイクル、送信busy、受信可能サイクル。YMIRは既存のSH-2保存構造へ、MednafenはSH7095のStateActionへ追加する。TCPソケット、ワーカースレッド、サービスのネットワークキュー、共有マッピング／リング／予算キャッシュは保存状態へシリアライズしない。
 
 | 操作 | YMIR | Mednafen |
 | --- | --- | --- |
 | 通常のTCP切断 | AutoLocalは有効状態を保ち新規接続を試す。明示host／clientは1セッション | ローカル自動接続中は新規接続を試す |
 | リセット／状態ロード | 同期ONでは時間軸不一致を検出してセッションを無効化。AutoLocalは停止フラグがなければ新規接続を試せる | ハードリセット／状態ロードは明示切断。復帰には左右プロセスを再起動する |
 | SMPCソフトリセットボタンNMI | YMIR固有のホスト処理に従う | ケーブル切断は未結線。左右を閉じて再起動する |
-| 同期中の一時停止 | 相手の進行も待機する | 相手の進行も待機する。非アクティブ時停止にも注意 |
+| 同期中の一時停止 | 相手の進行も待機する | 相手の進行も待機する。共有方式は30秒の進行待ち期限がある。非アクティブ時停止にも注意 |
 
 YMIRの同期OFFにはrevisionで検出する同じ保護がない。Mednafenは同期ON／OFFを問わず明示的なリセット処理で外部交通を切断する。両者とも通信中のセーブステートから対戦を継続する仕様ではなく、左右を揃えて新しいセッションを開始する。
 
@@ -248,6 +289,8 @@ YMIRでは同期接続中のデバッガ単一ステップで同期を中止す�
 Mednafenは状態変化時の診断と、通信量に変化がある場合の約2秒間隔のTX／RX／delivered／pending表示を使用する。`XBAND_MEDNAFEN_CABLE_CORE_TEST=1`は本体結線診断用で、ゲーム実行前に試験してロードを意図的に終了する。通常起動では指定しない。サーバーUIの通信ログ閲覧機能は、この直接SCI経路のログを表示しない。
 
 `transmitted`は送信登録側、`sent`はソケット送出側、`received`はホスト受信キュー側、`delivered`はキューから取り出した側のカウンタ。deliveredには受信無効時の排出も含み得るため、ゲームが読み取ったバイト数・対戦成功・メール受信確認と同一視しない。
+
+共有方式の`transmitted`／`sent`はリングへの公開件数で、ソケット送出を意味しない。
 
 ## 11 検証範囲と移植時の確認
 
@@ -286,6 +329,7 @@ Mednafen／共通追加部品では次を確認している。
 | SCI状態、フレーム時間、DMA／IRQ条件 | [components/link-cable/sci_state.hpp](../components/link-cable/sci_state.hpp) |
 | TCPサービスAPI・接続・キュー | [link_cable_service.hpp](../components/link-cable/link_cable_service.hpp)、[link_cable_service.cpp](../components/link-cable/link_cable_service.cpp) |
 | YLS1レコードと実行同期 | [link_cable_sync.inc](../components/link-cable/link_cable_sync.inc) |
+| Windowsローカル共有方式 | [local_sci_cable.hpp](../components/link-cable/local_sci_cable.hpp) |
 | Mednafen C ABI・環境設定・診断 | [cable_runtime.h](../components/xband/adapters/mednafen/cable_runtime.h)、[cable_runtime.cpp](../components/xband/adapters/mednafen/cable_runtime.cpp) |
 | Mednafen本体結線診断 | [cable_core_test.inc](../components/xband/adapters/mednafen/cable_core_test.inc) |
 | Mednafen追加差分・適用・起動 | [追加差分](../integration/mednafen/mednafen-1.32.1-link-cable.patch)、[適用スクリプト](../integration/mednafen/apply-link-cable.ps1)、[起動スクリプト](../integration/mednafen/start-link-cable.ps1) |
@@ -317,4 +361,4 @@ Mednafen／共通追加部品では次を確認している。
 | 実行ループ・単調時計・clockTag・リセット・状態ロード | `src/ss/ss.h`、`src/ss/ss.cpp` |
 | 状態pollとゲーム終了のキャンセル判定 | `src/drivers/main.cpp` |
 
-XBANDモデムとサーバーの仕様は[サーバーとモデムの仕様書](SERVER-MODEM-SPEC.md)、共通／ホストの責務は[エミュレーター統合仕様](EMULATOR-INTEGRATION-SPEC.md)を参照する。2026-10-12のv0.5.0差し替えZIP・対応タグにも本仕様を収録する。今回の差し替えでは対戦ケーブルの動作コードは変更しない。
+XBANDモデムとサーバーの仕様は[サーバーとモデムの仕様書](SERVER-MODEM-SPEC.md)、共通／ホストの責務は[エミュレーター統合仕様](EMULATOR-INTEGRATION-SPEC.md)を参照する。SCI低遅延方式の追加検証は[最適化検証記録](../integration/mednafen/LINK-OPTIMIZATION-VERIFICATION.md)へ分けて記録する。

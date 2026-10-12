@@ -1,5 +1,6 @@
 #include "command_runtime.h"
 #include "card_runtime.h"
+#include "peer_poll_schedule.hpp"
 #include <xband/windows_modem_service.hpp>
 #include <xband/service_identity.hpp>
 #include <xband/peer_route.hpp>
@@ -12,6 +13,16 @@
 #include <xband/async_modem_link.hpp>
 #include <deque>
 #include <memory>
+#include <chrono>
+
+namespace {
+uint64_t commandWallMs(){
+    // GetTickCount64 is commonly quantized at ~16ms: it cannot pace a 1ms
+    // sub-frame pump. Use one monotonic QPC-backed domain for all client steps.
+    return uint64_t(std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count());
+}
+}
 
 struct XbandCommandRuntime {
     std::deque<uint8_t> replies;
@@ -49,6 +60,7 @@ struct XbandCommandRuntime {
     xband::AsyncModemReceive peerReceive;
     std::vector<uint8_t> peerTX;
     std::optional<nlohmann::json> peerNotice;
+    xband::mednafen::PeerPollSchedule livePoll;
     static constexpr uint64_t byteCycles=18750,timeoutCycles=75000;
     explicit XbandCommandRuntime(XbandCommandLog logger,XbandCommandClearReceive clear):log(logger),clearReceive(clear) {
         xband::ModemCommandSession::Hooks hooks;
@@ -113,6 +125,7 @@ struct XbandCommandRuntime {
         controlResponse.clear();waitObserver.reset();waitNotice.reset();
         peer=peerDialing=peerEnding=peerClosed=ring=bothJoined=false;caller=2;nextRingFrame=0;
         cycles=peerOrigin=peerTicket=sequence=0;hostPending=0;dialGate.reset();peerUart.reset();peerReceive.reset();peerTX.clear();peerNotice.reset();
+        livePoll.reset();
     }
     void fail() noexcept {failed=true;replies.clear();service.reset();buffer.reset();resetControl();}
     void resetReturnUART(){
@@ -253,9 +266,11 @@ struct XbandCommandRuntime {
                 if(peer)peerReceive.accept(bytes,cycles-peerOrigin,byteCycles);
             }
             if(!controlJoined&&log)log("STANDBY CONTROL JOIN ACKNOWLEDGED");
-            controlJoined=true;controlBusy=false;nextControlPoll=now+16;
+            controlJoined=true;controlBusy=false;
+            nextControlPoll=now+xband::mednafen::PeerPollSchedule::controlDelay(peer);
         }
-        if(control->state()!=Client::State::connected||controlBusy||now<nextControlPoll)return;
+        if(control->state()!=Client::State::connected||controlBusy||
+           (now<nextControlPoll&&!peerNotice))return;
         nlohmann::json request;
         if(!controlJoined)request={{"op","join"},{"transport","async-v1"},{"standby_protocol","xband-readonly-v1"}};
         else if(peerNotice){request=*peerNotice;peerNotice.reset();}
@@ -276,8 +291,7 @@ struct XbandCommandRuntime {
             throw std::runtime_error("Control transfer rejected");
         controlBusy=true;
     }
-    void poll(){
-        const auto now=GetTickCount64();
+    void poll(uint64_t now){
         finishResetButtonCall();
         finishReturnUARTCall();
         pollControl(now);
@@ -408,7 +422,18 @@ extern "C" int xband_command_configure_service(XbandCommandRuntime* r,uint16_t p
     }catch(...){return 0;}
 }
 extern "C" void xband_command_poll(XbandCommandRuntime* r){
-    if(!r||r->failed)return;try{r->poll();}catch(const std::exception& e){if(r->log)r->log(e.what());r->fail();}catch(...){r->fail();}
+    if(!r||r->failed)return;try{r->poll(commandWallMs());}catch(const std::exception& e){if(r->log)r->log(e.what());r->fail();}catch(...){r->fail();}
+}
+extern "C" int xband_command_live_poll(XbandCommandRuntime* r){
+    // Called only from the cart event, never mapped UART reads/writes. No sleep,
+    // retry loop or worker touching the guest. Driver polling remains unchanged.
+    if(!r||r->failed||!r->peer||!r->livePoll.cycleDue(r->cycles))return 0;
+    try{
+        const auto now=commandWallMs();
+        if(!r->livePoll.admit(r->cycles,now))return 0;
+        r->poll(now);return 1;
+    }catch(const std::exception& e){if(r->log)r->log(e.what());r->fail();}catch(...){r->fail();}
+    return 0;
 }
 extern "C" int xband_command_configure_control(XbandCommandRuntime* r,uint16_t port){
     if(!r||r->control||port<1024)return 0;r->controlPort=port;return 1;
